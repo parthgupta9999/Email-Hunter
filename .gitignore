@@ -1,0 +1,28 @@
+# Local runtime data (never commit)
+data/*
+!data/.gitkeep
+.env
+.env.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.Python
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+.cursor/
+
+# Legacy / local artifacts
+sent_log.csv
+daily_state.json
+settings.json

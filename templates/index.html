@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Email Hunter</title>
+  <link rel="icon" href="/static/mono.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="mesh-bg" aria-hidden="true"></div>
+
+  <div class="app-layout">
+    <aside id="user-sidebar" class="user-sidebar hidden" aria-label="Account">
+      <div class="user-sidebar-brand">
+        <img class="logo-mark" src="/static/mono.png" alt="" width="34" height="34" aria-hidden="true">
+        <span class="logo-text">Email Hunter</span>
+      </div>
+      <nav class="user-nav" aria-label="Workflow">
+        <button type="button" class="user-nav-item" data-step="2">
+          <span data-icon="upload"></span> Import
+        </button>
+        <button type="button" class="user-nav-item" data-step="3">
+          <span data-icon="edit"></span> Compose
+        </button>
+        <button type="button" class="user-nav-item" data-step="4">
+          <span data-icon="mail"></span> Review
+        </button>
+      </nav>
+      <div class="user-sidebar-footer">
+        <div class="user-card user-card-bottom">
+          <div class="user-card-row">
+            <div class="user-avatar" id="sidebar-avatar">U</div>
+            <div class="user-card-info">
+              <span class="user-name" id="sidebar-username">User</span>
+              <div class="user-status">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span>Online</span>
+              </div>
+            </div>
+          </div>
+          <p class="user-email" id="sidebar-email"></p>
+        </div>
+      </div>
+    </aside>
+
+    <div class="app-body">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="logo" href="#">
+        <img class="logo-mark" src="/static/mono.png" alt="Email Hunter" width="38" height="38">
+        <span class="logo-text">Email Hunter</span>
+      </a>
+      <div id="daily-banner" class="quota-badge"></div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <nav class="wizard" id="steps" aria-label="Progress">
+      <button class="wizard-step active" data-step="1">
+        <span class="wizard-num">1</span>
+        <span class="wizard-label">Connect</span>
+      </button>
+      <button class="wizard-step" data-step="2">
+        <span class="wizard-num">2</span>
+        <span class="wizard-label">Import</span>
+      </button>
+      <button class="wizard-step" data-step="3">
+        <span class="wizard-num">3</span>
+        <span class="wizard-label">Compose</span>
+      </button>
+      <button class="wizard-step" data-step="4">
+        <span class="wizard-num">4</span>
+        <span class="wizard-label">Review</span>
+      </button>
+      <button class="wizard-step wizard-step-send hidden" data-step="5">
+        <span class="wizard-num">5</span>
+        <span class="wizard-label">Sending</span>
+      </button>
+    </nav>
+
+    <!-- Step 1 -->
+    <section class="stage active" id="panel-1">
+      <div class="stage-intro">
+        <h1 id="connect-title">Connect your email</h1>
+        <p id="connect-subtitle">Sign in with Gmail or Outlook using an app password.</p>
+      </div>
+      <div class="connect-grid">
+        <aside class="surface connect-aside">
+          <h3 class="aside-title">What this does</h3>
+          <ul class="connect-points">
+            <li>Upload Excel or CSV with contact emails.</li>
+            <li>Write one template — name and company fill in from the sheet.</li>
+            <li>Check each email before it sends.</li>
+            <li>Runs on your machine. Credentials stay here.</li>
+            <li>Max {{ daily_limit }} emails per day per connected address.</li>
+          </ul>
+
+          <div class="info-callout info-callout-trust">
+            <h4 class="info-callout-title">Send from a trusted address</h4>
+            <p>Use a Gmail or Outlook account you have already used for normal email. Google and Microsoft track sender reputation over time — how often you send, whether people reply, and whether messages get marked as spam.</p>
+            <p><strong>New or barely used accounts</strong> rarely have that history. Cold outreach from them is far more likely to land in spam or Promotions. An older address with real conversations and steady use is the safer choice.</p>
+          </div>
+
+          <div class="info-callout info-callout-gmail" id="connect-info-gmail">
+            <h4 class="info-callout-title">Gmail requires 2FA</h4>
+            <p>App passwords only work if <strong>2-Step Verification</strong> is on.</p>
+            <ol class="info-steps">
+              <li>Turn on 2FA in <a href="https://myaccount.google.com/security" target="_blank" rel="noopener">Google Account security</a>.</li>
+              <li>Create one under <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">App Passwords</a> (pick “Mail”).</li>
+              <li>Paste the 16-character password below.</li>
+            </ol>
+            <a class="btn btn-soft btn-sm info-callout-btn" href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Generate app password</a>
+          </div>
+
+          <div class="info-callout info-callout-outlook hidden" id="connect-info-outlook">
+            <h4 class="info-callout-title">Outlook requires 2FA</h4>
+            <p>App passwords work for personal Outlook/Hotmail accounts with <strong>two-step verification</strong> on.</p>
+            <ol class="info-steps">
+              <li>Turn on 2FA at <a href="https://account.microsoft.com/security" target="_blank" rel="noopener">Microsoft account security</a>.</li>
+              <li>Create an app password under Advanced security options.</li>
+              <li>Paste it below — not your regular Outlook password.</li>
+            </ol>
+            <p class="info-steps info-steps-note">Work/school accounts may need SMTP enabled by IT.</p>
+            <a class="btn btn-soft btn-sm info-callout-btn" href="https://account.microsoft.com/security" target="_blank" rel="noopener">Generate app password</a>
+          </div>
+        </aside>
+
+        <div class="surface connect-main">
+          <div class="provider-tabs" role="tablist" aria-label="Email provider">
+            <button type="button" class="provider-tab active" data-provider="gmail" role="tab" aria-selected="true">Gmail</button>
+            <button type="button" class="provider-tab" data-provider="outlook" role="tab" aria-selected="false">Outlook</button>
+          </div>
+          <form id="mail-form" class="stack">
+            <div class="field">
+              <label for="mail-address">Email address</label>
+              <input type="email" id="mail-address" placeholder="you@gmail.com" autocomplete="email" required>
+            </div>
+            <div class="field">
+              <label for="mail-password">App Password</label>
+              <input type="password" id="mail-password" placeholder="xxxx xxxx xxxx xxxx" autocomplete="off" required>
+              <p class="field-hint" id="mail-password-hint"><a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">Generate app password</a> · requires 2FA</p>
+            </div>
+            <div class="row-actions">
+              <button type="button" class="btn btn-soft" id="test-mail">Test connection</button>
+              <button type="submit" class="btn btn-brand" id="mail-submit-btn">Save & continue</button>
+            </div>
+          </form>
+          <div id="mail-connect-loading" class="verify-loading verify-loading-compact hidden" aria-live="polite">
+            <span class="inline-spinner" aria-hidden="true"></span>
+            <span id="mail-connect-loading-label">Verifying connection…</span>
+          </div>
+          <div id="mail-status" class="toast hidden"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2 -->
+    <section class="stage" id="panel-2">
+      <div class="stage-intro">
+        <h1>Import contacts</h1>
+        <p>Upload Excel or CSV — analysis runs automatically. Max {{ max_recipients }} per batch.</p>
+      </div>
+      <div class="import-grid">
+        <div class="surface import-main">
+          <form id="upload-form">
+            <label class="dropzone" id="sheet-dropzone">
+              <input type="file" id="sheet-file" accept=".xlsx,.xls,.xlsm,.csv" hidden required>
+              <span class="dropzone-icon" data-icon="upload"></span>
+              <span class="dropzone-title">Drop spreadsheet here</span>
+              <span class="dropzone-meta">or click to browse · .xlsx .xls .csv</span>
+              <span class="dropzone-filename hidden" id="sheet-filename"></span>
+            </label>
+            <div class="upload-form-actions">
+              <button type="submit" class="btn btn-soft" id="reanalyze-btn">Re-analyze</button>
+              <button type="button" class="btn btn-brand hidden" id="upload-continue">Continue to compose</button>
+            </div>
+          </form>
+        </div>
+
+        <aside class="surface import-aside" id="import-analysis-aside">
+          <div class="analysis-head">
+            <h3 class="aside-title">Spreadsheet analysis</h3>
+            <span class="analysis-badge" id="analysis-badge">Pending</span>
+          </div>
+          <div id="upload-analysis-panel">
+            <p class="aside-empty">Upload and analyze a file to see column mapping and preview rows.</p>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Step 3: Compose -->
+    <section class="stage" id="panel-3">
+      <div class="stage-intro">
+        <h1>Compose your email</h1>
+        <p id="compose-intro-text">Write once, personalize for every contact.</p>
+      </div>
+
+      <div id="compose-ai-panel" class="hidden">
+        <div class="compose-ai-toolbar">
+          <button type="button" class="btn btn-soft btn-sm" id="compose-ai-back">Back to import</button>
+        </div>
+
+        <div class="surface compose-ai-simple">
+          <h3 class="aside-title">Draft per contact</h3>
+          <p class="field-hint compose-ai-lead">Upload your resume. We research each company and write one email per row using your connected API.</p>
+          <p class="field-hint compose-ai-provider" id="compose-ai-provider-label">Connected via Groq</p>
+
+          <label class="attach-zone" id="resume-zone">
+            <input type="file" id="resume-file" accept=".pdf,.doc,.docx" hidden>
+            <span class="attach-zone-icon" data-icon="paperclip"></span>
+            <span class="attach-zone-title" id="resume-zone-title">Upload resume (PDF or DOCX)</span>
+            <span class="attach-zone-meta">Parsed locally · attached automatically to each email</span>
+          </label>
+          <div id="resume-status" class="toast hidden"></div>
+
+          <div class="field">
+            <label for="portfolio-url">Portfolio link <span class="field-optional">(optional)</span></label>
+            <input type="url" id="portfolio-url" placeholder="https://yoursite.com" autocomplete="off">
+            <p class="field-hint">If provided, your portfolio can be referenced in each draft.</p>
+          </div>
+
+          <div id="ai-generate-status" class="toast hidden"></div>
+          <div class="row-actions compose-ai-actions">
+            <button type="button" class="btn btn-brand btn-ai-generate" id="ai-generate-btn" disabled>
+              <span class="btn-ai-star" data-icon="star" aria-hidden="true"></span>
+              Generate drafts
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="compose-manual-panel" class="hidden">
+        <div class="compose-manual-toolbar">
+          <button type="button" class="btn btn-soft btn-sm" id="compose-manual-back">Back to import</button>
+        </div>
+      <div class="compose-grid">
+        <div class="surface compose-main">
+          <div class="field">
+            <label for="subject">Subject line</label>
+            <input type="text" id="subject" placeholder="Software Engineer open to opportunities">
+          </div>
+          <div class="field">
+            <label for="body">Message</label>
+            <textarea id="body" rows="18" placeholder="Hi {person name},&#10;&#10;I wanted to reach out about..."></textarea>
+          </div>
+
+          <div id="attach-reminder" class="alert-banner hidden">
+            <span class="alert-icon" data-icon="alert"></span>
+            <div>
+              <strong>Attachment referenced</strong>
+              <p>Your message mentions attaching something — add a file below, or remove words like attach, attached, attachment.</p>
+            </div>
+          </div>
+
+          <label class="attach-zone" id="attach-zone">
+            <input type="file" id="attachment-file" accept=".pdf,.doc,.docx" hidden>
+            <span class="attach-zone-icon" data-icon="paperclip"></span>
+            <span class="attach-zone-title" id="attach-zone-title">Add attachment (optional)</span>
+            <span class="attach-zone-meta" id="attach-zone-meta">PDF, DOC, or DOCX · only required if you mention attaching</span>
+          </label>
+          <button type="button" class="btn btn-soft btn-sm attach-remove hidden" id="remove-attachment">Remove file</button>
+
+          <div id="template-errors" class="toast toast-error hidden"></div>
+
+          <div class="row-actions">
+            <button type="button" class="btn btn-soft" id="preview-btn">Preview sample</button>
+            <button type="button" class="btn btn-brand" id="to-review-btn">Review emails</button>
+          </div>
+        </div>
+
+        <aside class="surface compose-aside">
+          <h3 class="aside-title">Personalization</h3>
+          <div id="placeholder-panel">
+            <p id="placeholder-empty" class="aside-empty">Upload contacts to configure placeholders.</p>
+          </div>
+          <div class="aside-note">
+            <span data-icon="alert"></span>
+            <p>Use <code>{person name}</code> and <code>{company name}</code> when those columns exist in your sheet. If some cells are blank, set what to use in the sidebar.</p>
+          </div>
+        </aside>
+      </div>
+
+      <div id="preview-result" class="surface preview-drawer hidden"></div>
+      </div>
+    </section>
+
+    <!-- Step 4: Review -->
+    <section class="stage" id="panel-4">
+      <div class="stage-intro review-intro">
+        <div>
+          <h1>Review before send</h1>
+          <p>Approve to send immediately. Each email goes out in the background while you review the rest.</p>
+        </div>
+        <div class="review-stats">
+          <div class="stat-pill approved"><span id="approved-count">0</span> approved</div>
+          <div class="stat-pill rejected"><span id="rejected-count">0</span> skipped</div>
+          <div class="stat-pill pending"><span id="pending-count">0</span> left</div>
+        </div>
+      </div>
+
+      <div class="review-bar">
+        <div class="review-track"><div class="review-fill" id="review-progress-fill"></div></div>
+        <span id="review-counter" class="review-count">0 / 0</span>
+      </div>
+      <div id="review-partial-banner" class="toast hidden" role="status"></div>
+
+      <div class="review-stage" id="card-stage">
+        <div id="review-loading" class="state-empty hidden">Preparing previews…</div>
+        <div id="gmail-card" class="inbox-card hidden"></div>
+        <div id="regen-overlay" class="regen-overlay hidden" aria-live="polite">
+          <div class="regen-overlay-card">
+            <div class="regen-paper" aria-hidden="true">
+              <div class="regen-paper-line regen-paper-line--1"></div>
+              <div class="regen-paper-line regen-paper-line--2"></div>
+              <div class="regen-paper-line regen-paper-line--3"></div>
+              <div class="regen-paper-line regen-paper-line--4"></div>
+            </div>
+            <p class="regen-label" id="regen-label">Rewriting…</p>
+            <p class="regen-status" id="regen-status"></p>
+            <button type="button" class="btn btn-soft regen-cancel-btn" id="regen-cancel">Cancel</button>
+          </div>
+        </div>
+        <div id="review-done" class="state-done hidden">
+          <div class="state-done-icon" data-icon="check"></div>
+          <h2>Review complete</h2>
+          <p id="review-done-text"></p>
+        </div>
+      </div>
+
+      <div id="review-actions" class="review-actions-grid hidden">
+        <button type="button" class="decision decision-reject" id="btn-reject">
+          <span data-icon="x"></span> Reject
+        </button>
+        <button type="button" class="decision decision-edit" id="btn-edit">
+          <span data-icon="edit"></span> Edit
+        </button>
+        <button type="button" class="decision decision-regenerate hidden" id="btn-regenerate">
+          <span data-icon="refresh"></span> Regenerate
+        </button>
+        <button type="button" class="decision decision-approve" id="btn-approve">
+          <span data-icon="check"></span> Approve
+        </button>
+        <button type="button" class="decision decision-approve-all hidden" id="approve-all-btn">
+          <span data-icon="checkDouble"></span> Approve all
+        </button>
+      </div>
+
+      <div id="review-errors" class="toast toast-error hidden"></div>
+      <div id="review-send-badge" class="review-send-badge hidden" aria-live="polite">
+        <div class="mini-ring" id="mini-ring"></div>
+        <span id="review-send-badge-text">0 sent</span>
+      </div>
+    </section>
+
+    <!-- Step 5: Campaign progress -->
+    <section class="stage" id="panel-5">
+      <div class="campaign-page">
+        <div class="ring-progress-wrap">
+          <svg class="ring-progress" viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="ring-track" cx="60" cy="60" r="52" />
+            <circle class="ring-fill" id="ring-fill" cx="60" cy="60" r="52" />
+          </svg>
+          <div class="ring-center">
+            <span class="ring-percent" id="ring-percent">0%</span>
+            <span class="ring-sublabel" id="ring-sublabel">Sending</span>
+          </div>
+        </div>
+
+        <h1 class="campaign-title" id="campaign-title">Sending your emails…</h1>
+        <p class="campaign-subtitle" id="campaign-subtitle">Approved emails are sent in the background.</p>
+
+        <div class="campaign-stats">
+          <div class="campaign-stat">
+            <span class="campaign-stat-num" id="stat-sent">0</span>
+            <span class="campaign-stat-label">Sent</span>
+          </div>
+          <div class="campaign-stat">
+            <span class="campaign-stat-num" id="stat-queued">0</span>
+            <span class="campaign-stat-label">In queue</span>
+          </div>
+          <div class="campaign-stat">
+            <span class="campaign-stat-num" id="stat-failed">0</span>
+            <span class="campaign-stat-label">Failed</span>
+          </div>
+        </div>
+
+        <div class="campaign-footer">
+          <p class="campaign-last" id="campaign-last"></p>
+
+          <div class="campaign-actions hidden" id="campaign-done-actions">
+            <button type="button" class="btn btn-brand" id="campaign-new-btn">Start new campaign</button>
+            <button type="button" class="btn btn-soft" id="campaign-compose-btn">Back to compose</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span class="foot-brand">
+      <img class="logo-mark logo-mark-sm" src="/static/mono.png" alt="" width="20" height="20" aria-hidden="true">
+      Email Hunter
+    </span>
+    <span>{{ daily_limit }} emails/day · local & private</span>
+  </footer>
+    </div>
+  </div>
+
+  <!-- Compose method choice (after spreadsheet upload) -->
+  <div id="compose-choice-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="compose-choice-title">
+    <div class="modal-card compose-choice-modal">
+      <h2 id="compose-choice-title">Choose how to build emails</h2>
+      <p class="modal-lead">Your spreadsheet is ready. Pick one path.</p>
+      <div class="compose-choice-actions">
+        <button type="button" class="compose-choice-card" id="compose-choice-manual">
+          <span class="compose-choice-icon compose-choice-icon-manual" data-icon="edit" aria-hidden="true"></span>
+          <span class="compose-choice-card-content">
+            <span class="compose-choice-card-title">Single template</span>
+            <span class="compose-choice-card-desc">One subject and body for everyone. Names and companies fill in from your sheet.</span>
+          </span>
+        </button>
+        <button type="button" class="compose-choice-card compose-choice-card-ai" id="compose-choice-ai">
+          <span class="compose-choice-icon compose-choice-icon-ai" aria-hidden="true">
+            <span class="compose-choice-star-glow" data-icon="star"></span>
+          </span>
+          <span class="compose-choice-card-content">
+            <span class="compose-choice-card-title">Customise with AI</span>
+            <span class="compose-choice-card-desc">Emails are crafted with company information and your experience.</span>
+          </span>
+        </button>
+      </div>
+      <button type="button" class="btn btn-soft btn-sm edit-choice-cancel" id="compose-choice-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- AI provider + API key (AI path only) -->
+  <div id="llm-key-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="llm-key-title">
+    <div class="modal-card">
+      <div class="modal-icon modal-icon-compose" data-icon="star"></div>
+      <h2 id="llm-key-title">Connect your API key</h2>
+      <p class="modal-lead">We verify your key once, then use it only to draft emails. It stays in this browser session.</p>
+      <div class="provider-tabs llm-provider-tabs" role="tablist" aria-label="AI provider">
+        <button type="button" class="provider-tab active" data-llm-provider="groq" role="tab" aria-selected="true">Groq</button>
+        <button type="button" class="provider-tab" data-llm-provider="gemini" role="tab" aria-selected="false">Gemini</button>
+      </div>
+      <div id="llm-key-disclaimer" class="gemini-disclaimer">
+        <p>Your key stays in this browser session only. Requests go directly to the provider you select.</p>
+        <p id="llm-key-free-note">No credit card required. Limits are per model; check your quota at <a href="https://console.groq.com/settings/limits" target="_blank" rel="noopener">console.groq.com/settings/limits</a>.</p>
+      </div>
+      <div class="field">
+        <label for="llm-api-key" id="llm-api-key-label">Groq API key</label>
+        <input type="password" id="llm-api-key" placeholder="gsk_…" autocomplete="off">
+        <p class="field-hint" id="llm-api-key-hint"><a href="https://console.groq.com/keys" target="_blank" rel="noopener">Create a key in Groq Console</a></p>
+      </div>
+      <div id="llm-key-error" class="toast hidden"></div>
+      <div id="llm-key-loading" class="verify-loading verify-loading-compact hidden" aria-live="polite">
+        <span class="inline-spinner" aria-hidden="true"></span>
+        <span>Checking key…</span>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-soft" id="llm-key-cancel">Back</button>
+        <button type="button" class="btn btn-brand" id="llm-key-continue">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI pipeline loading -->
+  <div id="ai-loading-modal" class="modal-overlay ai-loading-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="ai-loading-title">
+    <div class="ai-loading-card">
+      <div class="ai-loading-visual">
+        <div id="ai-loader-gather" class="ai-loader-panel active">
+          <div class="ai-gather-scene" aria-hidden="true">
+            <div class="ai-monitor">
+              <div class="ai-monitor-screen">
+                <span class="ai-screen-dot"></span>
+                <span class="ai-screen-dot"></span>
+                <span class="ai-screen-dot"></span>
+                <div class="ai-screen-content">
+                  <span class="ai-screen-bar"></span>
+                  <span class="ai-screen-bar short"></span>
+                  <span class="ai-screen-bar"></span>
+                </div>
+                <div class="ai-magnifier">
+                  <span class="ai-magnifier-lens"></span>
+                  <span class="ai-magnifier-handle"></span>
+                </div>
+              </div>
+              <div class="ai-monitor-chin"></div>
+              <div class="ai-monitor-stand"></div>
+            </div>
+          </div>
+        </div>
+        <div id="ai-loader-write" class="ai-loader-panel">
+          <div class="ai-write-scene" aria-hidden="true">
+            <div class="ai-paper-sheet">
+              <div class="ai-paper-header"></div>
+              <div class="ai-paper-line ai-paper-line--1"></div>
+              <div class="ai-paper-line ai-paper-line--2"></div>
+              <div class="ai-paper-line ai-paper-line--3"></div>
+              <div class="ai-paper-line ai-paper-line--4"></div>
+              <div class="ai-paper-line ai-paper-line--5"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <h2 id="ai-loading-title">Gathering info about companies</h2>
+      <p id="ai-loading-subtitle" class="ai-loading-subtitle">Looking up each company from your spreadsheet…</p>
+      <div class="ai-loading-progress">
+        <div class="review-bar">
+          <div class="review-track"><div class="review-fill" id="ai-loading-fill"></div></div>
+          <span id="ai-loading-counter" class="review-count">0 / 0</span>
+        </div>
+        <p id="ai-loading-detail" class="field-hint"></p>
+      </div>
+      <button type="button" class="btn btn-soft ai-loading-cancel" id="ai-loading-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Responsibility disclaimer (shown on connect) -->
+  <div id="disclaimer-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="disclaimer-title">
+    <div class="modal-card">
+      <div class="modal-icon" data-icon="alert"></div>
+      <h2 id="disclaimer-title">Important — read before continuing</h2>
+      <div class="modal-body">
+        <p class="modal-lead">By connecting and using Email Hunter, you acknowledge and agree to the following:</p>
+        <ul class="disclaimer-list">
+          <li>Sending unsolicited bulk email (spam) is <strong>illegal</strong> in many jurisdictions and violates <strong>Google's Terms of Service</strong>.</li>
+          <li>You must comply with all applicable laws, including CAN-SPAM, GDPR, and local regulations.</li>
+          <li>Any consequences arising from your outreach — including account suspension, legal action, or penalties — are <strong>solely your responsibility</strong>.</li>
+        </ul>
+        <div class="disclaimer-account">
+          <span class="disclaimer-label">Account holder responsible</span>
+          <span class="disclaimer-email" id="disclaimer-email">you@gmail.com</span>
+        </div>
+        <p class="disclaimer-footnote">
+          Email Hunter runs locally on your device. We do not store, transmit, or retain your email credentials on any external server. However, this tool and its creators accept <strong>no liability</strong> for how you use it.
+        </p>
+        <div class="field disclaimer-agree-field">
+          <label for="disclaimer-agree-input">Type <strong>I AGREE</strong> to continue</label>
+          <input type="text" id="disclaimer-agree-input" autocomplete="off" spellcheck="false" placeholder="I AGREE" inputmode="text">
+          <p class="field-hint">Only the letters in I AGREE are accepted. Nothing else will register.</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-soft" id="disclaimer-cancel">Cancel</button>
+        <button type="button" class="btn btn-brand" id="disclaimer-accept" disabled>I understand and accept</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit choice (review step) -->
+  <div id="edit-choice-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="edit-choice-title">
+    <div class="modal-card modal-card-sm">
+      <div class="modal-icon modal-icon-edit" data-icon="edit"></div>
+      <h2 id="edit-choice-title">What would you like to edit?</h2>
+      <p class="modal-lead">You're reviewing an email to <strong id="edit-choice-email"></strong></p>
+      <div class="edit-choice-actions">
+        <button type="button" class="btn btn-brand" id="edit-this-email">This email only</button>
+        <button type="button" class="btn btn-soft" id="edit-template">General template</button>
+      </div>
+      <button type="button" class="btn btn-soft btn-sm edit-choice-cancel" id="edit-choice-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Per-email editor -->
+  <div id="email-edit-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="email-edit-title">
+    <div class="modal-card modal-card-wide">
+      <h2 id="email-edit-title">Edit email for <span id="email-edit-recipient" class="email-edit-addr"></span></h2>
+      <p class="modal-lead">Changes apply only to this recipient. Other emails still use your general template.</p>
+      <div class="stack email-edit-form">
+        <div class="field">
+          <label for="email-edit-subject">Subject</label>
+          <input type="text" id="email-edit-subject" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="email-edit-body">Message</label>
+          <textarea id="email-edit-body" rows="12"></textarea>
+        </div>
+        <div id="email-edit-error" class="toast toast-error hidden"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-soft" id="email-edit-cancel">Cancel</button>
+          <button type="button" class="btn btn-brand" id="email-edit-save">Save for this email</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.APP_CONFIG = { maxRecipients: {{ max_recipients }}, dailyLimit: {{ daily_limit }} };
+  </script>
+  <script src="/static/js/icons.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
