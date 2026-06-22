@@ -1161,6 +1161,89 @@ body {
   word-break: break-word;
 }
 
+.analysis-alert-info {
+  color: var(--text-secondary);
+  background: #f0f7ff;
+  border-color: #c7ddfc;
+}
+
+.analysis-fill-actions,
+.analysis-download-actions {
+  margin-top: 0.85rem;
+}
+
+.analysis-fill-callout {
+  margin: 0.85rem 0 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: var(--radius-sm);
+  background: var(--brand-soft);
+  border: 1px solid rgba(59, 130, 246, 0.22);
+}
+
+.analysis-fill-callout-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.analysis-fill-callout .field-hint {
+  margin-bottom: 0.75rem;
+}
+
+.analysis-fill-callout .btn-brand {
+  width: 100%;
+}
+
+.fill-result-card {
+  max-width: 480px;
+}
+
+.fill-skipped-list {
+  margin: 0.75rem 0 1rem;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #f8fafc;
+}
+
+.fill-skipped-list li {
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.fill-skipped-list li:last-child {
+  border-bottom: none;
+}
+
+.fill-skipped-email {
+  display: block;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.fill-skipped-msg {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--text-secondary);
+}
+
+.analysis-download-actions .field-hint {
+  margin-bottom: 0.55rem;
+}
+
+.analysis-download-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 
 /* Compose grid */
 .compose-mode-picker {
@@ -2821,6 +2904,47 @@ body {
 
 .gemini-disclaimer p + p {
   margin-top: 0.55rem;
+}
+
+.orchestration-option {
+  margin: 0.25rem 0 0.85rem;
+}
+
+.orchestration-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.orchestration-toggle input {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+  accent-color: var(--brand);
+}
+
+.orchestration-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.orchestration-toggle-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.orchestration-hint {
+  margin-top: 0.45rem;
+  padding-left: 1.45rem;
+}
+
+#llm-secondary-key-wrap {
+  margin-top: -0.25rem;
 }
 
 .field-optional {

@@ -217,7 +217,26 @@ RECIPIENT NAME: {recipient_name_line}
 {greeting_instruction}
 - Subject: specific when possible, under 10 words, no "opportunity" or "application".
 - Never use the word "Unknown" in the subject or body.
-- Use the company background when it is specific; if you do not know the company well, be honest and general without inventing product details."""
+- Use the company background when it is specific; stay general without inventing product details."""
+
+RECIPIENT_PROMPT_COMPANY_NO_ABOUT = """Write ONE complete, send-ready cold outreach email to someone at the company below.
+
+TARGET COMPANY: {company_name}
+{inferred_note}
+
+RECIPIENT NAME: {recipient_name_line}
+
+{greeting_instruction}
+
+We do not have scraped background for this company — write a strong general cold email using the company name and the candidate's resume only.
+- Use {company_name} naturally (e.g. interest in joining or contributing to {company_name}, reaching out to the team there).
+- Do NOT mention missing information, failed research, or that you could not find details about the company.
+- Do NOT invent or guess what they build, sell, or focus on.
+- Lead with the candidate's skills, projects, and experience — why they are worth a conversation.
+- Include clear cold-outreach intent: express interest in being part of {company_name} and that the candidate believes they could add value to the team (phrase it naturally, not as a cliché).
+- End with a low-pressure ask, e.g. whether they would be open to a brief conversation.
+- Subject: may include the company name when natural, under 10 words, no "opportunity" or "application".
+- Never use the word "Unknown" in the subject or body."""
 
 # Legacy full prompts — used when context cache is unavailable.
 EMAIL_PROMPT_NO_COMPANY = """You are writing ONE cold outreach email on behalf of the candidate below.
@@ -322,8 +341,16 @@ def build_recipient_prompt(
         )
 
     company = company_name.strip()
-    about = _format_company_about(company, company_about, about_found)
     inferred_note = EMAIL_PROMPT_INFERRED_NOTE if company_name_source in {"email_domain", "website"} else ""
+    if not about_found:
+        return RECIPIENT_PROMPT_COMPANY_NO_ABOUT.format(
+            company_name=company,
+            inferred_note=inferred_note,
+            recipient_name_line=name_line,
+            greeting_instruction=_greeting_instruction(person_name, company_name=company),
+        )
+
+    about = _format_company_about(company, company_about, about_found)
     return RECIPIENT_PROMPT_COMPANY.format(
         company_name=company,
         inferred_note=inferred_note,
@@ -521,12 +548,7 @@ def _trim_text(text: str, max_chars: int) -> str:
 def _format_company_about(company_name: str, about_text: str, about_found: bool) -> str:
     if about_found and about_text.strip():
         return _trim_text(about_text.strip(), MAX_ABOUT_CHARS)
-    if company_name.strip():
-        return (
-            f"No website/about text available for {company_name.strip()}. "
-            "Use your knowledge only if you genuinely know this company; otherwise write a professional generic email."
-        )
-    return "No company background available."
+    return ""
 
 
 def _portfolio_block(portfolio_url: str | None) -> str:
@@ -599,6 +621,20 @@ def _sanitize_draft(subject: str, body: str) -> tuple[str, str]:
     subject = re.sub(r"\bUnknown\b", "", subject, flags=re.I).strip(" ,:-")
     body = re.sub(r"\bUnknown company\b", "your team", body, flags=re.I)
     body = re.sub(r"\bat Unknown\b", "", body, flags=re.I)
+    body = re.sub(
+        r"(?:Although|While|Since)\s+I\s+(?:couldn't|could not|was unable to)\s+find"
+        r"(?:\s+much|\s+any)?\s+information about[^.\n]*[.\s]*",
+        "",
+        body,
+        flags=re.I,
+    )
+    body = re.sub(
+        r"I\s+(?:couldn't|could not|was unable to)\s+find(?:\s+much|\s+any)?\s+information about[^.\n]*\.?\s*",
+        "",
+        body,
+        flags=re.I,
+    )
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
     return subject.strip(), body.strip()
 
 
@@ -1287,3 +1323,24 @@ def generate_outreach_email(
 
     log.error("All draft attempts failed for %s: %s", company_name or "email", last_error)
     raise ValueError(last_error)
+
+
+def complete_prompt_gemini(
+    api_key: str,
+    prompt: str,
+    *,
+    on_status: Callable[[str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    call_label: str = "gemini",
+) -> str:
+    """Single Gemini completion (used by multi-agent orchestration)."""
+    raw, _finish = _call_model(
+        api_key,
+        prompt,
+        GEMINI_MODEL,
+        on_status,
+        cache_name=None,
+        cancel_check=cancel_check,
+        call_label=call_label,
+    )
+    return raw

@@ -10,13 +10,14 @@ import shutil
 import threading
 import time
 import uuid
+from io import BytesIO
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify, render_template, request, send_file, session
 from werkzeug.utils import secure_filename
 
-from company_resolver import enrich_rows
-from company_scraper import fetch_company_about, unique_companies
+from company_resolver import enrich_rows, resolve_company_for_row
+from company_scraper import fetch_or_use_sheet_about, unique_companies
 from gemini_client import (
     GenerationCancelled,
     GeminiQuotaExhausted,
@@ -37,6 +38,7 @@ from groq_client import (
     reset_rate_limit_tracking as reset_groq_rate_limit_tracking,
     verify_api_key as verify_groq_api_key,
 )
+from multi_agent import OrchestrationAgentError, generate_outreach_orchestrated, should_orchestrate
 
 AI_PROVIDERS = frozenset({"gemini", "groq"})
 QUOTA_EXPIRED_MESSAGE = "Your daily quota is expired. Review the emails generated so far."
@@ -65,10 +67,76 @@ def _verify_provider_key(provider: str, api_key: str) -> None:
         verify_gemini_api_key(api_key)
 
 
-def _generate_outreach_email(provider: str, *args, **kwargs):
+def _generate_outreach_email(
+    provider: str,
+    api_key: str,
+    resume_text: str,
+    company_name: str,
+    company_about: str,
+    about_found: bool,
+    portfolio_url: str | None = None,
+    *,
+    person_name: str = "",
+    company_name_missing: bool = False,
+    company_name_source: str = "sheet",
+    cache_name: str | None = None,
+    on_status=None,
+    cancel_check=None,
+    multi_agent: bool = False,
+    secondary_api_key: str | None = None,
+) -> dict[str, str]:
+    if should_orchestrate(
+        multi_agent=multi_agent,
+        about_found=about_found,
+        company_name_missing=company_name_missing,
+        company_name=company_name,
+    ):
+        align_key = api_key
+        write_key = (secondary_api_key or "").strip() or api_key
+        return generate_outreach_orchestrated(
+            provider,
+            align_key,
+            write_key,
+            resume_text,
+            company_name,
+            company_about,
+            about_found,
+            portfolio_url,
+            person_name=person_name,
+            company_name_missing=company_name_missing,
+            company_name_source=company_name_source,
+            on_status=on_status,
+            cancel_check=cancel_check,
+        )
     if provider == "groq":
-        return generate_outreach_email_groq(*args, **kwargs)
-    return generate_outreach_email_gemini(*args, **kwargs)
+        return generate_outreach_email_groq(
+            api_key,
+            resume_text,
+            company_name,
+            company_about,
+            about_found,
+            portfolio_url,
+            person_name=person_name,
+            company_name_missing=company_name_missing,
+            company_name_source=company_name_source,
+            cache_name=cache_name,
+            on_status=on_status,
+            cancel_check=cancel_check,
+        )
+    return generate_outreach_email_gemini(
+        api_key,
+        resume_text,
+        company_name,
+        company_about,
+        about_found,
+        portfolio_url,
+        person_name=person_name,
+        company_name_missing=company_name_missing,
+        company_name_source=company_name_source,
+        cache_name=cache_name,
+        on_status=on_status,
+        cancel_check=cancel_check,
+    )
 
 
 def _store_provider_key(provider: str, api_key: str) -> None:
@@ -84,6 +152,24 @@ def _provider_api_key(provider: str) -> str:
     if provider == "groq":
         return (session.get("groq_api_key") or "").strip()
     return (session.get("gemini_api_key") or "").strip()
+
+
+def _secondary_api_key(provider: str) -> str:
+    stored = session.get("llm_api_key_secondary") or {}
+    if not isinstance(stored, dict):
+        return ""
+    if stored.get("provider") != provider:
+        return ""
+    return (stored.get("api_key") or "").strip()
+
+
+def _store_secondary_key(provider: str, api_key: str) -> None:
+    key = api_key.strip()
+    if not key:
+        session.pop("llm_api_key_secondary", None)
+    else:
+        session["llm_api_key_secondary"] = {"provider": provider, "api_key": key}
+    session.modified = True
 
 
 def _draft_stats(ctx: dict) -> dict[str, int]:
@@ -105,6 +191,11 @@ def _generation_status_payload(job_id: str | None, context_id: str | None) -> di
     snapshot["quota_exhausted"] = bool(
         snapshot.get("quota_exhausted") or (ctx.get("generation") or {}).get("quota_exhausted")
     )
+    snapshot["agent_abort"] = bool(
+        snapshot.get("agent_abort") or (ctx.get("generation") or {}).get("agent_abort")
+    )
+    if not snapshot.get("error"):
+        snapshot["error"] = (ctx.get("generation") or {}).get("error") or ""
     return snapshot
 from email_sender import (
     DAILY_LIMIT,
@@ -121,8 +212,12 @@ from email_sender import (
 from excel_parser import (
     MAX_RECIPIENTS,
     available_tokens,
+    export_spreadsheet,
     parse_excel,
+    refresh_upload_metadata,
     render_template as render_email_template,
+    rows_needing_company_fill,
+    upload_payload,
     validate_empty_fallbacks,
     validate_template,
 )
@@ -156,7 +251,11 @@ _gen_lock = threading.Lock()
 
 _regen_jobs: dict[str, dict] = {}
 _regen_lock = threading.Lock()
+
+_fill_jobs: dict[str, dict] = {}
+_fill_lock = threading.Lock()
 SCRAPE_DELAY = 0.6
+FILL_COMPANY_DELAY = 0.45
 
 
 def _ensure_dirs() -> None:
@@ -244,14 +343,20 @@ def _load_session_data() -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _save_session_data_by_id(upload_id: str, data: dict) -> None:
+    _ensure_dirs()
+    path = UPLOAD_DIR / f"{upload_id}.json"
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _save_session_data(data: dict) -> None:
     _ensure_dirs()
     upload_id = session.get("upload_id")
     if not upload_id:
         upload_id = uuid.uuid4().hex
         session["upload_id"] = upload_id
-    path = UPLOAD_DIR / f"{upload_id}.json"
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        session.modified = True
+    _save_session_data_by_id(upload_id, data)
 
 
 def _attachment_session_dir() -> Path:
@@ -386,11 +491,13 @@ def _clear_session_data() -> None:
             _gen_jobs.pop(gen_job_id, None)
 
     session.pop("upload_id", None)
+    session.pop("upload_fill_job_id", None)
     session.pop("attachment_session_id", None)
     session.pop("ai_context_id", None)
     session.pop("gemini_api_key", None)
     session.pop("groq_api_key", None)
     session.pop("ai_provider", None)
+    session.pop("llm_api_key_secondary", None)
     session.pop("ai_gen_job_id", None)
     session.pop("mail_app_password", None)
     session.pop("mail_email_address", None)
@@ -431,6 +538,7 @@ def _default_ai_context() -> dict:
         "companies": [],
         "drafts": {},
         "ai_provider": None,
+        "multi_agent": False,
         "generation": {
             "status": "idle",
             "phase": "idle",
@@ -445,6 +553,7 @@ def _default_ai_context() -> dict:
             "status_note": "",
             "cancelled": False,
             "quota_exhausted": False,
+            "agent_abort": False,
             "error": "",
         },
     }
@@ -461,6 +570,15 @@ def _company_about_for(company_name: str, companies: list[dict]) -> tuple[str, b
     if company_name.strip():
         return "", False
     return "", False
+
+
+def _about_for_recipient(row: dict, profiles: list[dict]) -> tuple[str, bool]:
+    """Prefer per-row spreadsheet about, then scraped/shared profile."""
+    row_about = str(row.get("company_about") or "").strip()
+    if row_about:
+        return row_about, True
+    company = str(row.get("company_name") or "").strip()
+    return _company_about_for(company, profiles)
 
 
 def _get_gen_job_id() -> str:
@@ -489,6 +607,7 @@ def _gen_snapshot(job_id: str, context_id: str | None = None) -> dict:
             "status_note": job.get("status_note", ""),
             "cancelled": job.get("cancelled", False),
             "quota_exhausted": job.get("quota_exhausted", False),
+            "agent_abort": job.get("agent_abort", False),
             "generated_ok": job.get("generated_ok", 0),
             "error": job.get("error", ""),
         }
@@ -530,9 +649,18 @@ def _patch_gen_status(job_id: str, context_id: str, **fields) -> None:
 
 
 
-def _run_ai_pipeline(job_id: str, api_key: str, upload_id: str, context_id: str, provider: str) -> None:
+def _run_ai_pipeline(
+    job_id: str,
+    api_key: str,
+    upload_id: str,
+    context_id: str,
+    provider: str,
+    secondary_api_key: str | None = None,
+) -> None:
     try:
-        _run_ai_pipeline_inner(job_id, api_key, upload_id, context_id, provider)
+        _run_ai_pipeline_inner(
+            job_id, api_key, upload_id, context_id, provider, secondary_api_key
+        )
     except GenerationCancelled:
         pipeline_log.warning("PIPELINE CANCELLED job=%s", job_id)
         ctx = _load_ai_context_by_id(context_id)
@@ -565,13 +693,19 @@ def _run_ai_pipeline(job_id: str, api_key: str, upload_id: str, context_id: str,
 
 
 def _run_ai_pipeline_inner(
-    job_id: str, api_key: str, upload_id: str, context_id: str, provider: str
+    job_id: str,
+    api_key: str,
+    upload_id: str,
+    context_id: str,
+    provider: str,
+    secondary_api_key: str | None = None,
 ) -> None:
     provider = _normalize_ai_provider(provider)
     _reset_provider_tracking(provider)
     data = _load_session_data_by_id(upload_id)
     ctx = _load_ai_context_by_id(context_id)
     ctx["ai_provider"] = provider
+    multi_agent = bool(ctx.get("multi_agent"))
     _save_ai_context_by_id(context_id, ctx)
     rows = enrich_rows(data["rows"] if data else [])
     resume = ctx.get("resume_text") or ""
@@ -607,6 +741,7 @@ def _run_ai_pipeline_inner(
         "status_note": "",
         "cancelled": False,
         "quota_exhausted": False,
+        "agent_abort": False,
         "generated_ok": 0,
         "error": "",
     }
@@ -642,7 +777,11 @@ def _run_ai_pipeline_inner(
         _save_ai_context_by_id(context_id, ctx)
 
         profiles.append(
-            fetch_company_about(company_name, entry.get("company_website") or None)
+            fetch_or_use_sheet_about(
+                company_name,
+                entry.get("company_website") or None,
+                rows,
+            )
         )
         profile = profiles[-1]
         pipeline_log.info(
@@ -689,7 +828,7 @@ def _run_ai_pipeline_inner(
 
     cache_name: str | None = None
     try:
-        if USE_EXPLICIT_CACHE and provider == "gemini":
+        if USE_EXPLICIT_CACHE and provider == "gemini" and not multi_agent:
             pipeline_log.info("Creating explicit context cache…")
             cache_name = create_outreach_cache(
                 api_key,
@@ -699,15 +838,22 @@ def _run_ai_pipeline_inner(
                 cancel_check=cancel_check,
             )
         else:
-            provider_label = "Groq" if provider == "groq" else "Gemini"
-            pipeline_log.info("%s — sending full prompt (resume+rules+task) per email", provider_label)
-            on_status(f"Preparing email generation with {provider_label}…")
+            if multi_agent:
+                on_status("Multi-agent mode — alignment agent, then writing agent…")
+            else:
+                provider_label = "Groq" if provider == "groq" else "Gemini"
+                pipeline_log.info("%s — sending full prompt (resume+rules+task) per email", provider_label)
+                on_status(f"Preparing email generation with {provider_label}…")
 
         quota_abort = False
+        agent_abort = False
+        agent_abort_message = ""
         quota_message = QUOTA_EXPIRED_MESSAGE
 
         for index, row in enumerate(rows):
             _raise_if_cancelled(job_id, context_id)
+            if agent_abort:
+                break
             email = row.get("email", "")
 
             if quota_abort:
@@ -758,12 +904,13 @@ def _run_ai_pipeline_inner(
                 status_note=f"Writing email for {email}…",
             )
 
-            about_text, about_found = _company_about_for(company, profiles)
+            about_text, about_found = _about_for_recipient(row, profiles)
             pipeline_log.info(
-                "EMAIL %s context | about_found=%s about_chars=%s company_name_missing=%s",
+                "EMAIL %s context | about_found=%s about_chars=%s sheet_about=%s company_name_missing=%s",
                 index + 1,
                 about_found,
                 len(about_text),
+                bool(str(row.get("company_about") or "").strip()),
                 bool(row.get("company_name_missing")),
             )
             draft = None
@@ -791,10 +938,18 @@ def _run_ai_pipeline_inner(
                         cache_name=cache_name,
                         on_status=on_status,
                         cancel_check=cancel_check,
+                        multi_agent=multi_agent,
+                        secondary_api_key=secondary_api_key,
                     )
                     break
                 except GenerationCancelled:
                     raise
+                except OrchestrationAgentError as exc:
+                    last_exc = exc
+                    agent_abort = True
+                    agent_abort_message = str(exc)
+                    pipeline_log.error("ORCHESTRATION ABORT at email %s: %s", index + 1, exc)
+                    break
                 except (GeminiQuotaExhausted, GroqQuotaExhausted) as exc:
                     last_exc = exc
                     quota_abort = True
@@ -858,6 +1013,32 @@ def _run_ai_pipeline_inner(
                         _gen_jobs[job_id]["status_note"] = ""
                         if quota_abort:
                             _gen_jobs[job_id]["quota_exhausted"] = True
+
+            if agent_abort:
+                ctx = _load_ai_context_by_id(context_id)
+                stats = _draft_stats(ctx)
+                msg = agent_abort_message or "Multi-agent generation stopped."
+                if stats["generated_ok"]:
+                    msg = (
+                        f"{agent_abort_message} "
+                        f"Review the {stats['generated_ok']} email(s) prepared so far."
+                    )
+                ctx["generation"]["status"] = "error"
+                ctx["generation"]["error"] = msg
+                ctx["generation"]["agent_abort"] = True
+                ctx["generation"]["current"] = ""
+                ctx["generation"]["current_company"] = ""
+                ctx["generation"]["status_note"] = msg
+                _save_ai_context_by_id(context_id, ctx)
+                with _gen_lock:
+                    if job_id in _gen_jobs:
+                        _gen_jobs[job_id]["status"] = "error"
+                        _gen_jobs[job_id]["error"] = msg
+                        _gen_jobs[job_id]["agent_abort"] = True
+                        _gen_jobs[job_id]["current"] = ""
+                        _gen_jobs[job_id]["current_company"] = ""
+                        _gen_jobs[job_id]["status_note"] = msg
+                break
     finally:
         if cache_name and provider == "gemini":
             pipeline_log.info("Deleting context cache %s", cache_name)
@@ -868,6 +1049,20 @@ def _run_ai_pipeline_inner(
     ctx = _load_ai_context_by_id(context_id)
     gen = ctx.get("generation") or {}
     stats = _draft_stats(ctx)
+    if gen.get("agent_abort") or (
+        gen.get("status") == "error" and gen.get("error") and not gen.get("quota_exhausted")
+    ):
+        pipeline_log.info(
+            "PIPELINE STOPPED EARLY job=%s | generated_ok=%s | error=%s",
+            job_id,
+            stats["generated_ok"],
+            gen.get("error"),
+        )
+        with _gen_lock:
+            if job_id in _gen_jobs:
+                _gen_jobs[job_id]["generated_ok"] = stats["generated_ok"]
+        return
+
     pipeline_log.info(
         "PIPELINE DONE job=%s | generated_ok=%s completed=%s failed=%s total=%s quota=%s",
         job_id,
@@ -1128,6 +1323,10 @@ def api_status():
                 "detected_columns": data["detected_columns"],
                 "placeholders": data["placeholders"],
                 "placeholder_fields": data.get("placeholder_fields"),
+                "sheet_about_count": data.get("sheet_about_count", 0),
+                "company_fill": data.get("company_fill"),
+                "company_names_filled": bool(data.get("company_names_filled")),
+                "company_fill_stats": data.get("company_fill_stats"),
                 "rows": data["rows"][:10],
                 "row_count": len(data["rows"]),
             }
@@ -1251,7 +1450,7 @@ def api_ai_companies():
     if not ctx.get("resume_text"):
         return jsonify({"ok": False, "error": "Upload your resume first."}), 400
 
-    companies = unique_companies(data["rows"])
+    companies = unique_companies(enrich_rows(data["rows"]))
     if not companies:
         ctx["companies_fetched"] = True
         ctx["companies"] = []
@@ -1264,12 +1463,17 @@ def api_ai_companies():
             }
         )
 
+    rows = enrich_rows(data["rows"])
     profiles: list[dict] = []
     for index, entry in enumerate(companies):
         if index:
             time.sleep(SCRAPE_DELAY)
         profiles.append(
-            fetch_company_about(entry["company_name"], entry.get("company_website") or None)
+            fetch_or_use_sheet_about(
+                entry["company_name"],
+                entry.get("company_website") or None,
+                rows,
+            )
         )
 
     ctx["companies_fetched"] = True
@@ -1302,16 +1506,35 @@ def api_ai_llm_key_verify():
         label = "Groq" if provider == "groq" else "Gemini"
         return jsonify({"ok": False, "error": f"Enter your {label} API key."}), 400
 
+    multi_agent = bool(body.get("multi_agent"))
+    secondary_key = (body.get("api_key_secondary") or "").strip()
+
     try:
         _verify_provider_key(provider, api_key)
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
+    if secondary_key:
+        try:
+            _verify_provider_key(provider, secondary_key)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": f"Second API key: {exc}"}), 400
+
     _store_provider_key(provider, api_key)
+    _store_secondary_key(provider, secondary_key if multi_agent else "")
     ctx = _load_ai_context()
     ctx["ai_provider"] = provider
+    ctx["multi_agent"] = multi_agent
     _save_ai_context(ctx)
-    return jsonify({"ok": True, "provider": provider, "message": "API key verified."})
+    return jsonify(
+        {
+            "ok": True,
+            "provider": provider,
+            "multi_agent": multi_agent,
+            "has_secondary_key": bool(secondary_key) if multi_agent else False,
+            "message": "API key verified.",
+        }
+    )
 
 
 @app.route("/api/ai/llm-key", methods=["GET"])
@@ -1321,6 +1544,7 @@ def api_ai_llm_key_status():
         return blocked
 
     provider = _normalize_ai_provider(request.args.get("provider") or session.get("ai_provider"))
+    ctx = _load_ai_context()
     return jsonify(
         {
             "ok": True,
@@ -1328,6 +1552,8 @@ def api_ai_llm_key_status():
             "has_key": bool(_provider_api_key(provider)),
             "has_gemini_key": bool(session.get("gemini_api_key")),
             "has_groq_key": bool(session.get("groq_api_key")),
+            "multi_agent": bool(ctx.get("multi_agent")),
+            "has_secondary_key": bool(_secondary_api_key(provider)),
         }
     )
 
@@ -1406,8 +1632,16 @@ def api_ai_generate():
         label = "Groq" if provider == "groq" else "Gemini"
         return jsonify({"ok": False, "error": f"Enter your {label} API key."}), 400
 
+    multi_agent = bool(body.get("multi_agent") if "multi_agent" in body else ctx.get("multi_agent"))
+    secondary_key = (body.get("api_key_secondary") or _secondary_api_key(provider)).strip()
+
     _store_provider_key(provider, api_key)
     ctx["ai_provider"] = provider
+    ctx["multi_agent"] = multi_agent
+    if multi_agent and (body.get("api_key_secondary") or "").strip():
+        _store_secondary_key(provider, secondary_key)
+    elif not multi_agent:
+        _store_secondary_key(provider, "")
     _save_ai_context(ctx)
 
     upload_id = session.get("upload_id")
@@ -1420,10 +1654,11 @@ def api_ai_generate():
     session.modified = True
 
     pipeline_log.info(
-        "API /api/ai/generate → job=%s context=%s recipients=%s",
+        "API /api/ai/generate → job=%s context=%s recipients=%s multi_agent=%s",
         job_id,
         context_id,
         len(data["rows"]),
+        multi_agent,
     )
 
     with _gen_lock:
@@ -1431,7 +1666,14 @@ def api_ai_generate():
 
     threading.Thread(
         target=_run_ai_pipeline,
-        args=(job_id, api_key, upload_id, context_id, provider),
+        args=(
+            job_id,
+            api_key,
+            upload_id,
+            context_id,
+            provider,
+            secondary_key if multi_agent else None,
+        ),
         daemon=True,
     ).start()
     companies_list = unique_companies(enrich_rows(data["rows"]))
@@ -1596,9 +1838,296 @@ def api_upload():
     finally:
         temp_path.unlink(missing_ok=True)
 
+    parsed["original_filename"] = secure_filename(file.filename)
     session["upload_id"] = uuid.uuid4().hex
+    session.pop("upload_fill_job_id", None)
+    session.modified = True
     _save_session_data(parsed)
     return jsonify({"ok": True, **parsed})
+
+
+@app.route("/api/upload/data", methods=["GET"])
+def api_upload_data():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    data = _load_session_data()
+    if not data:
+        return jsonify({"ok": False, "error": "Upload a spreadsheet first."}), 400
+
+    return jsonify(upload_payload(data))
+
+
+def _run_fill_companies_job(job_id: str, upload_id: str) -> None:
+    try:
+        _run_fill_companies_job_inner(job_id, upload_id)
+    except Exception as exc:
+        pipeline_log.exception("FILL COMPANIES ERROR job=%s: %s", job_id, exc)
+        with _fill_lock:
+            if job_id in _fill_jobs:
+                _fill_jobs[job_id]["status"] = "error"
+                _fill_jobs[job_id]["error"] = str(exc)
+
+
+def _run_fill_companies_job_inner(job_id: str, upload_id: str) -> None:
+    data = _load_session_data_by_id(upload_id)
+    if not data:
+        with _fill_lock:
+            if job_id in _fill_jobs:
+                _fill_jobs[job_id]["status"] = "error"
+                _fill_jobs[job_id]["error"] = "Upload session expired."
+        return
+
+    rows = list(data.get("rows") or [])
+    fill_indices = rows_needing_company_fill(rows)
+    total = len(fill_indices)
+    filled_total = 0
+    skipped: list[dict] = []
+
+    with _fill_lock:
+        if job_id in _fill_jobs:
+            _fill_jobs[job_id]["total"] = total
+
+    if not total:
+        cols = data.setdefault("detected_columns", {})
+        if not cols.get("company_name"):
+            cols["company_name"] = "Company"
+        data["rows"] = rows
+        data["company_names_filled"] = True
+        data["company_fill_stats"] = {"filled": 0, "processed": 0, "skipped": 0}
+        refresh_upload_metadata(data)
+        _save_session_data_by_id(upload_id, data)
+        _finish_fill_companies_job(job_id, data, filled_total, skipped)
+        return
+
+    for step, index in enumerate(fill_indices):
+        with _fill_lock:
+            job = _fill_jobs.get(job_id)
+            if not job or job.get("cancelled"):
+                with _fill_lock:
+                    if job_id in _fill_jobs:
+                        _fill_jobs[job_id]["status"] = "cancelled"
+                return
+
+        row = rows[index]
+        email = str(row.get("email") or "")
+
+        with _fill_lock:
+            if job_id in _fill_jobs:
+                _fill_jobs[job_id]["current"] = email
+                _fill_jobs[job_id]["current_company"] = ""
+                _fill_jobs[job_id]["status_note"] = (
+                    f"Reading domain for {email}…" if email else "Processing…"
+                )
+
+        inferred = resolve_company_for_row(row)
+        company = str(inferred.get("company_name") or "").strip()
+        if company:
+            row["company_name"] = company
+            row["company_name_source"] = inferred.get("company_name_source", "email_domain")
+            row["company_name_missing"] = False
+            filled_total += 1
+        else:
+            row["company_name_missing"] = True
+            skipped.append(
+                {
+                    "email": email,
+                    "message": "I cannot determine with full confidence so skipped.",
+                }
+            )
+
+        completed = step + 1
+        with _fill_lock:
+            if job_id in _fill_jobs:
+                _fill_jobs[job_id]["completed"] = completed
+                _fill_jobs[job_id]["filled"] = filled_total
+
+        if step + 1 < total:
+            time.sleep(FILL_COMPANY_DELAY)
+
+    cols = data.setdefault("detected_columns", {})
+    if not cols.get("company_name"):
+        cols["company_name"] = "Company"
+
+    data["rows"] = rows
+    data["company_names_filled"] = True
+    data["company_fill_stats"] = {
+        "filled": filled_total,
+        "processed": total,
+        "skipped": len(skipped),
+    }
+    refresh_upload_metadata(data)
+    _save_session_data_by_id(upload_id, data)
+    _finish_fill_companies_job(job_id, data, filled_total, skipped)
+
+
+def _finish_fill_companies_job(
+    job_id: str,
+    data: dict,
+    filled_total: int,
+    skipped: list[dict],
+) -> None:
+    with _fill_lock:
+        if job_id not in _fill_jobs:
+            return
+        _fill_jobs[job_id]["filled"] = filled_total
+        _fill_jobs[job_id]["skipped"] = skipped
+        _fill_jobs[job_id]["completed"] = _fill_jobs[job_id].get("total", 0)
+        _fill_jobs[job_id]["result"] = {
+            "filled": filled_total,
+            "processed": _fill_jobs[job_id].get("total", 0),
+            "skipped": skipped,
+            "company_fill": data.get("company_fill"),
+            "detected_columns": data.get("detected_columns"),
+            "placeholder_fields": data.get("placeholder_fields"),
+            "placeholders": data.get("placeholders"),
+            "rows": data.get("rows") or [],
+            "selected_count": data.get("selected_count"),
+            "total_valid_emails": data.get("total_valid_emails"),
+            "truncated": data.get("truncated"),
+            "sheet_about_count": data.get("sheet_about_count"),
+            "company_names_filled": True,
+            "company_fill_stats": data.get("company_fill_stats"),
+        }
+        _fill_jobs[job_id]["status"] = "done"
+        _fill_jobs[job_id]["phase"] = "done"
+        _fill_jobs[job_id]["status_note"] = ""
+        _fill_jobs[job_id]["current"] = ""
+        _fill_jobs[job_id]["current_company"] = ""
+
+
+@app.route("/api/upload/fill-companies", methods=["POST"])
+def api_upload_fill_companies():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    data = _load_session_data()
+    if not data:
+        return jsonify({"ok": False, "error": "Upload a spreadsheet first."}), 400
+
+    company_fill = data.get("company_fill") or {}
+    if not company_fill.get("needs_fill"):
+        return jsonify({"ok": False, "error": "All contacts already have company names."}), 400
+    if not company_fill.get("inferrable_count"):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "No work email domains found to infer company names (e.g. Gmail addresses).",
+            }
+        ), 400
+
+    upload_id = session.get("upload_id")
+    if not upload_id:
+        return jsonify({"ok": False, "error": "Upload session expired."}), 400
+
+    rows = data.get("rows") or []
+    to_fill = len(rows_needing_company_fill(rows))
+
+    job_id = uuid.uuid4().hex
+    session["upload_fill_job_id"] = job_id
+    session.modified = True
+
+    with _fill_lock:
+        _fill_jobs[job_id] = {
+            "status": "running",
+            "phase": "scraping",
+            "total": to_fill,
+            "completed": 0,
+            "filled": 0,
+            "skipped": [],
+            "current": "",
+            "current_company": "",
+            "status_note": "Starting…",
+            "cancelled": False,
+            "error": "",
+            "result": None,
+        }
+
+    threading.Thread(
+        target=_run_fill_companies_job,
+        args=(job_id, upload_id),
+        daemon=True,
+    ).start()
+
+    return jsonify({"ok": True, "job_id": job_id, "total": to_fill})
+
+
+@app.route("/api/upload/fill-companies/status", methods=["GET"])
+def api_upload_fill_companies_status():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    job_id = session.get("upload_fill_job_id")
+    if not job_id:
+        return jsonify({"ok": False, "error": "No fill job in progress."}), 400
+
+    with _fill_lock:
+        job = _fill_jobs.get(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "Fill job not found."}), 404
+
+    payload = {
+        "ok": True,
+        "status": job.get("status", "idle"),
+        "phase": job.get("phase", "scraping"),
+        "total": job.get("total", 0),
+        "completed": job.get("completed", 0),
+        "filled": job.get("filled", 0),
+        "current": job.get("current", ""),
+        "current_company": job.get("current_company", ""),
+        "status_note": job.get("status_note", ""),
+        "error": job.get("error", ""),
+        "skipped": job.get("skipped", []),
+        "result": job.get("result"),
+    }
+    return jsonify(payload)
+
+
+@app.route("/api/upload/fill-companies/cancel", methods=["POST"])
+def api_upload_fill_companies_cancel():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    job_id = session.get("upload_fill_job_id")
+    if not job_id:
+        return jsonify({"ok": False, "error": "No fill job in progress."}), 400
+
+    with _fill_lock:
+        if job_id in _fill_jobs:
+            _fill_jobs[job_id]["cancelled"] = True
+            _fill_jobs[job_id]["status_note"] = "Cancelling…"
+    return jsonify({"ok": True})
+
+
+@app.route("/api/upload/download", methods=["GET"])
+def api_upload_download():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    data = _load_session_data()
+    if not data:
+        return jsonify({"ok": False, "error": "Upload a spreadsheet first."}), 400
+
+    fmt = (request.args.get("format") or "xlsx").strip().lower()
+    if fmt not in {"xlsx", "csv"}:
+        fmt = "xlsx"
+
+    try:
+        content, mime, filename = export_spreadsheet(data, fmt)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    return send_file(
+        BytesIO(content),
+        mimetype=mime,
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
 @app.route("/api/preview", methods=["POST"])
@@ -1645,12 +2174,16 @@ def api_review():
     ctx = _load_ai_context()
     if use_ai_drafts or (
         ctx.get("compose_mode") == "ai"
-        and (ctx.get("generation") or {}).get("status") in {"done", "cancelled"}
+        and (ctx.get("generation") or {}).get("status") in {"done", "cancelled", "error"}
         and ctx.get("drafts")
     ):
         drafts = ctx.get("drafts") or {}
         gen = ctx.get("generation") or {}
-        partial_stop = bool(gen.get("quota_exhausted")) or gen.get("status") == "cancelled"
+        partial_stop = (
+            bool(gen.get("quota_exhausted"))
+            or gen.get("status") == "cancelled"
+            or bool(gen.get("agent_abort"))
+        )
         recipients = []
         for row in data["rows"]:
             email = row.get("email", "")
@@ -1687,7 +2220,8 @@ def api_review():
                 "recipients": recipients,
                 "total": len(recipients),
                 "ai_mode": True,
-                "partial_review": partial_stop or bool(gen.get("quota_exhausted")),
+                "partial_review": partial_stop,
+                "agent_abort": bool(gen.get("agent_abort")),
                 "generated_ok": _draft_stats(ctx)["generated_ok"],
             }
         )
@@ -1722,6 +2256,9 @@ def _run_regenerate_job(
     profiles: list[dict],
     context_id: str,
     provider: str,
+    *,
+    multi_agent: bool = False,
+    secondary_api_key: str | None = None,
 ) -> None:
     provider = _normalize_ai_provider(provider)
     company = row.get("company_name", "")
@@ -1748,9 +2285,9 @@ def _run_regenerate_job(
     cache_name: str | None = None
     try:
         _reset_provider_tracking(provider)
-        about_text, about_found = _company_about_for(company, profiles)
+        about_text, about_found = _about_for_recipient(row, profiles)
         provider_label = "Groq" if provider == "groq" else "Gemini"
-        if USE_EXPLICIT_CACHE and provider == "gemini":
+        if USE_EXPLICIT_CACHE and provider == "gemini" and not multi_agent:
             cache_name = create_outreach_cache(
                 api_key,
                 resume,
@@ -1759,7 +2296,10 @@ def _run_regenerate_job(
                 cancel_check=cancel_check,
             )
         else:
-            on_status(f"Rewriting with {provider_label}…")
+            if multi_agent:
+                on_status("Multi-agent rewrite — alignment, then draft…")
+            else:
+                on_status(f"Rewriting with {provider_label}…")
 
         draft = _generate_outreach_email(
             provider,
@@ -1775,6 +2315,8 @@ def _run_regenerate_job(
             cache_name=cache_name,
             on_status=on_status,
             cancel_check=cancel_check,
+            multi_agent=multi_agent,
+            secondary_api_key=secondary_api_key,
         )
 
         ctx = _load_ai_context_by_id(context_id)
@@ -1879,9 +2421,13 @@ def api_ai_regenerate():
             "recipient": None,
         }
 
+    multi_agent = bool(ctx.get("multi_agent"))
+    secondary_key = _secondary_api_key(provider) if multi_agent else None
+
     threading.Thread(
         target=_run_regenerate_job,
         args=(job_id, api_key, row, email_key, resume, portfolio_url, profiles, context_id, provider),
+        kwargs={"multi_agent": multi_agent, "secondary_api_key": secondary_key or None},
         daemon=True,
     ).start()
 

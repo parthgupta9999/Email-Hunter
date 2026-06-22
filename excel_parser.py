@@ -1,11 +1,14 @@
-"""Parse Excel files and detect email, person name, and company columns."""
+"""Parse Excel files and detect email, person name, company, website, and about columns."""
 
 from __future__ import annotations
 
 import re
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+
+from company_resolver import resolve_company_for_row
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 MAX_RECIPIENTS = 50
@@ -56,6 +59,17 @@ WEBSITE_HINTS = (
     "domain",
     "web",
     "homepage",
+)
+ABOUT_HINTS = (
+    "about",
+    "about company",
+    "company about",
+    "about us",
+    "company description",
+    "company info",
+    "company overview",
+    "company background",
+    "about the company",
 )
 
 
@@ -131,6 +145,11 @@ def parse_excel(path: Path, limit: int = MAX_RECIPIENTS) -> dict:
         WEBSITE_HINTS,
         {c for c in (email_col, person_col, company_col) if c},
     )
+    about_col = _detect_column(
+        norm_cols,
+        ABOUT_HINTS,
+        {c for c in (email_col, person_col, company_col, website_col) if c},
+    )
 
     if not email_col:
         email_col = _detect_email_by_content(df, set())
@@ -144,6 +163,7 @@ def parse_excel(path: Path, limit: int = MAX_RECIPIENTS) -> dict:
     person_key = normalized[person_col] if person_col else None
     company_key = normalized[company_col] if company_col else None
     website_key = normalized[website_col] if website_col else None
+    about_key = normalized[about_col] if about_col else None
 
     rows: list[dict] = []
     seen_emails: set[str] = set()
@@ -173,6 +193,11 @@ def parse_excel(path: Path, limit: int = MAX_RECIPIENTS) -> dict:
             val = raw.get(website_key, "")
             website = "" if pd.isna(val) else str(val).strip()
 
+        company_about = ""
+        if about_key:
+            val = raw.get(about_key, "")
+            company_about = "" if pd.isna(val) else str(val).strip()
+
         if len(rows) < limit:
             rows.append(
                 {
@@ -180,6 +205,7 @@ def parse_excel(path: Path, limit: int = MAX_RECIPIENTS) -> dict:
                     "person_name": person,
                     "company_name": company,
                     "company_website": website,
+                    "company_about": company_about,
                 }
             )
 
@@ -209,7 +235,7 @@ def parse_excel(path: Path, limit: int = MAX_RECIPIENTS) -> dict:
         "company_name": _field_meta(company_key, rows, "company_name", PLACEHOLDER_COMPANY),
     }
 
-    return {
+    payload = {
         "rows": rows,
         "total_rows_in_file": len(df),
         "total_valid_emails": total_valid,
@@ -220,9 +246,32 @@ def parse_excel(path: Path, limit: int = MAX_RECIPIENTS) -> dict:
             "person_name": person_key,
             "company_name": company_key,
             "company_website": website_key,
+            "company_about": about_key,
         },
+        "sheet_about_count": sum(1 for r in rows if r.get("company_about")),
         "placeholders": placeholders,
         "placeholder_fields": placeholder_fields,
+    }
+    refresh_upload_metadata(payload)
+    return payload
+
+
+def upload_payload(data: dict) -> dict:
+    """JSON-serializable upload snapshot for the client."""
+    return {
+        "ok": True,
+        "rows": data.get("rows") or [],
+        "total_rows_in_file": data.get("total_rows_in_file", 0),
+        "total_valid_emails": data.get("total_valid_emails", 0),
+        "selected_count": data.get("selected_count", 0),
+        "truncated": data.get("truncated", False),
+        "detected_columns": data.get("detected_columns") or {},
+        "sheet_about_count": data.get("sheet_about_count", 0),
+        "placeholders": data.get("placeholders") or [],
+        "placeholder_fields": data.get("placeholder_fields") or {},
+        "company_fill": data.get("company_fill") or {},
+        "company_names_filled": bool(data.get("company_names_filled")),
+        "company_fill_stats": data.get("company_fill_stats") or {},
     }
 
 
@@ -344,3 +393,143 @@ def render_template(text: str, row: dict, fallbacks: dict | None = None) -> str:
     company = row.get("company_name") or fallbacks.get("company_name", "")
     result = text.replace(PLACEHOLDER_PERSON, person).replace(PLACEHOLDER_COMPANY, company)
     return result
+
+
+def company_fill_summary(rows: list[dict], company_column: str | None) -> dict:
+    empty_count = sum(1 for row in rows if not str(row.get("company_name") or "").strip())
+    inferrable_count = 0
+    for row in rows:
+        if str(row.get("company_name") or "").strip():
+            continue
+        inferred = resolve_company_for_row(row)
+        if str(inferred.get("company_name") or "").strip():
+            inferrable_count += 1
+    return {
+        "needs_fill": not company_column or empty_count > 0,
+        "empty_count": empty_count,
+        "missing_column": not bool(company_column),
+        "inferrable_count": inferrable_count,
+    }
+
+
+def rows_needing_company_fill(rows: list[dict]) -> list[int]:
+    return [
+        index
+        for index, row in enumerate(rows)
+        if not str(row.get("company_name") or "").strip()
+    ]
+
+
+def refresh_upload_metadata(data: dict) -> None:
+    """Recompute placeholders and company-fill stats after rows or columns change."""
+    cols = data.setdefault("detected_columns", {})
+    rows = data.get("rows") or []
+
+    if not cols.get("company_name"):
+        if any(str(row.get("company_name") or "").strip() for row in rows):
+            cols["company_name"] = "Company"
+
+    placeholders = []
+    if cols.get("person_name"):
+        placeholders.append(
+            {
+                "token": PLACEHOLDER_PERSON,
+                "label": "Person name",
+                "description": "Inserts the contact's name from your sheet",
+            }
+        )
+    if cols.get("company_name"):
+        placeholders.append(
+            {
+                "token": PLACEHOLDER_COMPANY,
+                "label": "Company name",
+                "description": "Inserts the company name from your sheet",
+            }
+        )
+
+    data["placeholders"] = placeholders
+    data["placeholder_fields"] = {
+        "person_name": _field_meta(cols.get("person_name"), rows, "person_name", PLACEHOLDER_PERSON),
+        "company_name": _field_meta(cols.get("company_name"), rows, "company_name", PLACEHOLDER_COMPANY),
+    }
+    data["sheet_about_count"] = sum(1 for row in rows if str(row.get("company_about") or "").strip())
+    data["company_fill"] = company_fill_summary(rows, cols.get("company_name"))
+
+
+def fill_company_names(rows: list[dict]) -> tuple[list[dict], dict]:
+    """Fill blank company names from email domains / website columns."""
+    updated: list[dict] = []
+    stats = {
+        "filled": 0,
+        "already_set": 0,
+        "unresolved": 0,
+        "processed": 0,
+    }
+
+    for row in rows:
+        stats["processed"] += 1
+        item = dict(row)
+        if str(item.get("company_name") or "").strip():
+            stats["already_set"] += 1
+            updated.append(item)
+            continue
+
+        inferred = resolve_company_for_row(item)
+        company = str(inferred.get("company_name") or "").strip()
+        if company:
+            item["company_name"] = company
+            item["company_name_source"] = inferred.get("company_name_source", "email_domain")
+            item["company_name_missing"] = False
+            stats["filled"] += 1
+        else:
+            item["company_name_missing"] = True
+            stats["unresolved"] += 1
+        updated.append(item)
+
+    return updated, stats
+
+
+EXPORT_COLUMNS = (
+    ("email", "Email"),
+    ("person_name", "Name"),
+    ("company_name", "Company"),
+    ("company_website", "Website"),
+    ("company_about", "Company about"),
+)
+
+
+def export_spreadsheet(data: dict, fmt: str = "xlsx") -> tuple[bytes, str, str]:
+    """Build a downloadable spreadsheet from session upload data."""
+    cols = data.get("detected_columns") or {}
+    rows = data.get("rows") or []
+
+    headers: list[str] = []
+    fields: list[str] = []
+    for field, default_header in EXPORT_COLUMNS:
+        header = cols.get(field) or default_header
+        include = field == "email"
+        if not include:
+            if cols.get(field):
+                include = True
+            elif field == "company_name" and data.get("company_names_filled"):
+                include = True
+            elif any(str(row.get(field) or "").strip() for row in rows):
+                include = True
+        if include:
+            headers.append(header)
+            fields.append(field)
+
+    if not fields:
+        raise ValueError("Nothing to export.")
+
+    records = [{headers[i]: row.get(fields[i], "") for i in range(len(fields))} for row in rows]
+    frame = pd.DataFrame(records, columns=headers)
+
+    stem = (data.get("original_filename") or "contacts").rsplit(".", 1)[0]
+    if fmt == "csv":
+        return frame.to_csv(index=False).encode("utf-8"), "text/csv", f"{stem}-with-companies.csv"
+
+    buffer = BytesIO()
+    frame.to_excel(buffer, index=False, engine="openpyxl")
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    return buffer.getvalue(), mime, f"{stem}-with-companies.xlsx"

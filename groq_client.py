@@ -227,6 +227,24 @@ def _call_model(
     raise ValueError(last_error)
 
 
+def complete_prompt_groq(
+    api_key: str,
+    prompt: str,
+    *,
+    on_status: Callable[[str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    call_label: str = "groq",
+) -> str:
+    """Single Groq completion (used by multi-agent orchestration)."""
+    return _call_model(
+        api_key,
+        prompt,
+        on_status=on_status,
+        cancel_check=cancel_check,
+        call_label=call_label,
+    )
+
+
 def verify_api_key(api_key: str) -> None:
     url = f"{GROQ_API_BASE}/models"
     headers = {"Authorization": f"Bearer {api_key}"}

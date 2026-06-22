@@ -457,6 +457,21 @@
         <input type="password" id="llm-api-key" placeholder="gsk_…" autocomplete="off">
         <p class="field-hint" id="llm-api-key-hint"><a href="https://console.groq.com/keys" target="_blank" rel="noopener">Create a key in Groq Console</a></p>
       </div>
+      <div class="orchestration-option">
+        <label class="orchestration-toggle" for="llm-multi-agent">
+          <input type="checkbox" id="llm-multi-agent">
+          <span class="orchestration-toggle-text">
+            <strong>Multi-agent orchestration</strong>
+            <span>Stronger resume ↔ company alignment</span>
+          </span>
+        </label>
+        <p class="field-hint orchestration-hint">One agent reads the company background and your resume, then finds specific alignment points you can mention. A second agent writes the email using that research.</p>
+      </div>
+      <div id="llm-secondary-key-wrap" class="field hidden">
+        <label for="llm-api-key-secondary" id="llm-api-key-secondary-label">Second API key (optional)</label>
+        <input type="password" id="llm-api-key-secondary" placeholder="Use a second account key…" autocomplete="off">
+        <p class="field-hint" id="llm-secondary-key-advice">On free tiers, each email uses two API calls (alignment + writing), which can hit RPM limits quickly. Adding a second key from another account spreads the load.</p>
+      </div>
       <div id="llm-key-error" class="toast hidden"></div>
       <div id="llm-key-loading" class="verify-loading verify-loading-compact hidden" aria-live="polite">
         <span class="inline-spinner" aria-hidden="true"></span>
@@ -518,6 +533,19 @@
         <p id="ai-loading-detail" class="field-hint"></p>
       </div>
       <button type="button" class="btn btn-soft ai-loading-cancel" id="ai-loading-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Company fill skipped entries -->
+  <div id="fill-companies-result-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="fill-result-title">
+    <div class="modal-card fill-result-card">
+      <div class="modal-icon modal-icon-compose" data-icon="alert"></div>
+      <h2 id="fill-result-title">Some companies could not be inferred</h2>
+      <p id="fill-result-summary" class="modal-lead"></p>
+      <ul id="fill-result-skipped" class="fill-skipped-list"></ul>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-brand" id="fill-result-close">OK</button>
+      </div>
     </div>
   </div>
 

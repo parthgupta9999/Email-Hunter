@@ -23,6 +23,7 @@
     editingRecipientEmail: null,
     composeMode: null,
     aiProvider: "groq",
+    multiAgent: false,
     aiResumeLoaded: false,
     aiGenPoll: null,
     aiCancelling: false,
@@ -31,6 +32,10 @@
     aiWriteTotal: 0,
     partialReview: false,
     reviewNotice: "",
+    uploadAnalysis: null,
+    loadingModalMode: "ai",
+    fillCompaniesPoll: null,
+    fillCancelling: false,
   };
 
   const RING_CIRCUMFERENCE = 326.73;
@@ -292,7 +297,7 @@
     }
 
     const block = (key, token, field) => {
-      if (!field.has_column) return "";
+      if (!field?.has_column) return "";
 
       if (field.has_empty) {
         const inputId = key === "person_name" ? "fallback-person" : "fallback-company";
@@ -495,12 +500,48 @@
 
       ${data.truncated ? `<div class="analysis-alert">Batch capped at ${window.APP_CONFIG.maxRecipients} contacts.</div>` : ""}
 
+      ${(() => {
+        const fill = data.company_fill || {};
+        const fillStats = data.company_fill_stats || {};
+        const showFill = fill.needs_fill && fill.inferrable_count > 0;
+        const showDownload = data.company_names_filled || (fillStats.filled || 0) > 0;
+        let html = "";
+        if (showFill) {
+          const missingNote = fill.missing_column
+            ? "No company column detected."
+            : `${fill.empty_count} contact${fill.empty_count === 1 ? "" : "s"} missing a company name.`;
+          html += `
+      <div class="analysis-fill-callout">
+        <p class="analysis-fill-callout-title">Company names missing</p>
+        <p class="field-hint">${missingNote} We can infer ${fill.inferrable_count} from work email domains (rows that already have a company are left unchanged).</p>
+        <button type="button" class="btn btn-brand" id="fill-companies-btn">Fill company names from emails</button>
+      </div>`;
+        } else if (fill.needs_fill && fill.empty_count && !fill.inferrable_count) {
+          html += `
+      <div class="analysis-alert">${fill.empty_count} contact${fill.empty_count === 1 ? "" : "s"} missing company names, but none use a work email domain we can infer from (e.g. Gmail).</div>`;
+        }
+        if (showDownload) {
+          html += `
+      <div class="analysis-download-actions">
+        <p class="field-hint">${fillStats.filled ? `${fillStats.filled} company name${fillStats.filled === 1 ? "" : "s"} added.` : "Download your spreadsheet with the current company names."}${fillStats.skipped ? ` ${fillStats.skipped} skipped.` : ""}</p>
+        <div class="analysis-download-buttons">
+          <button type="button" class="btn btn-soft btn-sm" id="download-sheet-xlsx">Download .xlsx</button>
+          <button type="button" class="btn btn-soft btn-sm" id="download-sheet-csv">Download .csv</button>
+        </div>
+      </div>`;
+        }
+        return html;
+      })()}
+
       <p class="analysis-section-title">Column mapping</p>
       <ul class="analysis-columns">
         ${colRow("Email", "email", c)}
         ${colRow("Name", "person_name", c)}
         ${colRow("Company", "company_name", c)}
+        ${colRow("Company about", "company_about", c)}
       </ul>
+
+      ${data.sheet_about_count ? `<div class="analysis-alert analysis-alert-info">${data.sheet_about_count} contact${data.sheet_about_count === 1 ? "" : "s"} include company about text — web crawling will be skipped for those.</div>` : ""}
 
       ${rows.length ? `
         <p class="analysis-section-title">Preview</p>
@@ -521,6 +562,8 @@
       ` : ""}`;
 
     setUploadContinueVisible(true);
+    state.uploadAnalysis = { ...data, rows: data.rows || [] };
+    injectIcons();
   }
 
   function restoreUploadAnalysis(summary) {
@@ -533,6 +576,10 @@
       rows: summary.rows || [],
       row_count: summary.row_count ?? summary.selected_count,
       placeholder_fields: summary.placeholder_fields,
+      sheet_about_count: summary.sheet_about_count,
+      company_fill: summary.company_fill,
+      company_names_filled: summary.company_names_filled,
+      company_fill_stats: summary.company_fill_stats,
     });
   }
 
@@ -1267,6 +1314,8 @@
     const btn = $("#llm-key-continue");
     const cancel = $("#llm-key-cancel");
     const input = $("#llm-api-key");
+    const secondaryInput = $("#llm-api-key-secondary");
+    const multiAgentToggle = $("#llm-multi-agent");
     if (!panel) return;
 
     panel.classList.toggle("hidden", !visible);
@@ -1277,7 +1326,19 @@
     }
     if (cancel) cancel.disabled = visible;
     if (input) input.disabled = visible;
+    if (secondaryInput) secondaryInput.disabled = visible;
+    if (multiAgentToggle) multiAgentToggle.disabled = visible;
     if (visible) hideToast($("#llm-key-error"));
+  }
+
+  function updateMultiAgentUi() {
+    const enabled = !!$("#llm-multi-agent")?.checked;
+    state.multiAgent = enabled;
+    const wrap = $("#llm-secondary-key-wrap");
+    wrap?.classList.toggle("hidden", !enabled);
+    if (!enabled && $("#llm-api-key-secondary")) {
+      $("#llm-api-key-secondary").value = "";
+    }
   }
 
   const LLM_PROVIDER_COPY = {
@@ -1320,7 +1381,8 @@
     const el = $("#compose-ai-provider-label");
     if (!el) return;
     const name = state.aiProvider === "groq" ? "Groq" : "Gemini";
-    el.textContent = `Connected via ${name}`;
+    const mode = state.multiAgent ? " · multi-agent orchestration" : "";
+    el.textContent = `Connected via ${name}${mode}`;
   }
 
   function mailConnectPayload() {
@@ -1479,6 +1541,9 @@
     hideToast($("#llm-key-error"));
     setGeminiKeyLoading(false);
     setAiProvider(state.aiProvider || "groq");
+    const multiToggle = $("#llm-multi-agent");
+    if (multiToggle) multiToggle.checked = !!state.multiAgent;
+    updateMultiAgentUi();
     $("#llm-api-key").focus();
   }
 
@@ -1496,10 +1561,25 @@
   }
 
   function showAiLoadingModal() {
+    state.loadingModalMode = "ai";
     resetAiLoadingCancelButton();
     const modal = $("#ai-loading-modal");
     modal.classList.remove("hidden");
     setAiLoadingPhase("scraping");
+  }
+
+  function showFillCompaniesModal(total) {
+    state.loadingModalMode = "fill-companies";
+    state.fillCancelling = false;
+    resetAiLoadingCancelButton();
+    const modal = $("#ai-loading-modal");
+    modal.classList.remove("hidden");
+    setAiLoadingPhase("scraping");
+    const title = $("#ai-loading-title");
+    const subtitle = $("#ai-loading-subtitle");
+    if (title) title.textContent = "Finding company names";
+    if (subtitle) subtitle.textContent = "Reading work email domains in your spreadsheet…";
+    updateFillCompaniesProgress({ total: total || 0, completed: 0, status_note: "Starting…" });
   }
 
   function hideAiLoadingModal() {
@@ -1516,12 +1596,243 @@
     scrapePanel?.classList.toggle("active", phase === "scraping");
     writePanel?.classList.toggle("active", phase === "writing" || phase === "done");
 
+    if (state.loadingModalMode === "fill-companies") {
+      if (title) title.textContent = "Finding company names";
+      if (subtitle) subtitle.textContent = "Reading work email domains in your spreadsheet…";
+      return;
+    }
+
     if (phase === "scraping") {
       title.textContent = "Gathering info about companies";
       subtitle.textContent = "Looking up each company from your spreadsheet…";
     } else {
       title.textContent = "Writing drafts";
       subtitle.textContent = "Preparing a separate email for each contact…";
+    }
+  }
+
+  function updateFillCompaniesProgress(data) {
+    setAiLoadingPhase("scraping");
+    const total = data.total || 0;
+    const done = data.completed || 0;
+    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    const fillEl = $("#ai-loading-fill");
+    if (fillEl) fillEl.style.width = `${pct}%`;
+    const counterEl = $("#ai-loading-counter");
+    if (counterEl) counterEl.textContent = total ? `${done} / ${total}` : "Starting…";
+    const detail = $("#ai-loading-detail");
+    if (!detail) return;
+    if (data.error) {
+      detail.textContent = data.error;
+      return;
+    }
+    if (data.status_note) {
+      detail.textContent = data.status_note;
+      return;
+    }
+    if (data.current) {
+      detail.textContent = `Checking ${data.current}…`;
+      return;
+    }
+    detail.textContent = "Inferring company names from email domains…";
+  }
+
+  function stopFillCompaniesPoll() {
+    if (state.fillCompaniesPoll) {
+      clearInterval(state.fillCompaniesPoll);
+      state.fillCompaniesPoll = null;
+    }
+  }
+
+  async function finishFillCompanies(result, failed = false) {
+    stopFillCompaniesPoll();
+    resetAiLoadingCancelButton();
+    state.loadingModalMode = "ai";
+    state.fillCancelling = false;
+    hideAiLoadingModal();
+
+    if (failed || !result) {
+      if (failed) alert("Company fill stopped or could not finish. Try again.");
+      return;
+    }
+
+    try {
+      const freshRes = await fetch("/api/upload/data");
+      const fresh = await freshRes.json();
+      if (fresh.ok) {
+        if (fresh.placeholders) state.placeholders = fresh.placeholders;
+        if (fresh.placeholder_fields) renderPlaceholderPanel(fresh.placeholder_fields);
+        renderUploadAnalysis(fresh);
+        showFillCompaniesResultModal({
+          ...result,
+          skipped: result.skipped || [],
+          filled: result.filled ?? fresh.company_fill_stats?.filled ?? 0,
+        });
+        return;
+      }
+    } catch (err) {
+      console.error("upload refresh failed", err);
+    }
+
+    try {
+      if (result.placeholders) state.placeholders = result.placeholders;
+      if (result.placeholder_fields) renderPlaceholderPanel(result.placeholder_fields);
+      renderUploadAnalysis({
+        ...(state.uploadAnalysis || {}),
+        ...result,
+        row_count: (result.rows || []).length || state.uploadAnalysis?.selected_count,
+      });
+    } catch (err) {
+      console.error("fill companies UI update failed", err);
+    }
+
+    showFillCompaniesResultModal(result);
+  }
+
+  function showFillCompaniesResultModal(result) {
+    const skipped = result?.skipped || [];
+    const filled = result.filled ?? result.company_fill_stats?.filled ?? 0;
+    const processed = result.processed ?? result.company_fill_stats?.processed ?? 0;
+
+    if (!skipped.length) {
+      if (processed > 0 && filled === 0) {
+        alert("I cannot determine company names with full confidence for any of the remaining contacts, so they were skipped.");
+      }
+      return;
+    }
+
+    const modal = $("#fill-companies-result-modal");
+    const summary = $("#fill-result-summary");
+    const list = $("#fill-result-skipped");
+    if (!modal || !summary || !list) return;
+
+    summary.textContent = filled
+      ? `Added ${filled} company name${filled === 1 ? "" : "s"}. For these contacts, I cannot determine with full confidence so skipped:`
+      : "For these contacts, I cannot determine with full confidence so skipped:";
+
+    list.innerHTML = skipped
+      .map(
+        (item) =>
+          `<li><span class="fill-skipped-email">${escapeHtml(item.email || "Unknown email")}</span><span class="fill-skipped-msg">${escapeHtml(item.message || "I cannot determine with full confidence so skipped.")}</span></li>`
+      )
+      .join("");
+
+    modal.classList.remove("hidden");
+    injectIcons();
+  }
+
+  function hideFillCompaniesResultModal() {
+    $("#fill-companies-result-modal")?.classList.add("hidden");
+  }
+
+  async function pollFillCompanies() {
+    let res;
+    let data;
+    try {
+      res = await fetch("/api/upload/fill-companies/status");
+      data = await res.json();
+    } catch {
+      finishFillCompanies(null, true);
+      return;
+    }
+
+    if (handleAuthRequired(res, data)) {
+      stopFillCompaniesPoll();
+      hideAiLoadingModal();
+      state.loadingModalMode = "ai";
+      return;
+    }
+
+    if (!data.ok) {
+      finishFillCompanies(null, true);
+      return;
+    }
+
+    updateFillCompaniesProgress(data);
+
+    if (data.status === "done" && data.result) {
+      await finishFillCompanies(data.result);
+      return;
+    }
+
+    if (data.status === "cancelled") {
+      finishFillCompanies(null, false);
+      return;
+    }
+
+    if (data.status === "error") {
+      finishFillCompanies(null, true);
+      if (data.error) alert(data.error);
+    }
+  }
+
+  function startFillCompaniesPoll() {
+    stopFillCompaniesPoll();
+    state.fillCompaniesPoll = setInterval(pollFillCompanies, 800);
+    pollFillCompanies();
+  }
+
+  async function startFillCompanies() {
+    if (!requireGmailVerified()) return;
+
+    const res = await fetch("/api/upload/fill-companies", { method: "POST" });
+    const data = await res.json();
+    if (handleAuthRequired(res, data)) return;
+    if (!data.ok) {
+      alert(data.error || "Could not start company fill.");
+      return;
+    }
+
+    showFillCompaniesModal(data.total || 0);
+    startFillCompaniesPoll();
+  }
+
+  async function cancelFillCompanies() {
+    if (state.fillCancelling) return;
+    state.fillCancelling = true;
+    const btn = $("#ai-loading-cancel");
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Cancelling…";
+    }
+    try {
+      await fetch("/api/upload/fill-companies/cancel", { method: "POST" });
+    } catch {
+      resetAiLoadingCancelButton();
+      state.fillCancelling = false;
+    }
+  }
+
+  async function downloadUpdatedSheet(format) {
+    const fmt = format || "xlsx";
+    try {
+      const res = await fetch(`/api/upload/download?format=${encodeURIComponent(fmt)}`);
+      const contentType = res.headers.get("content-type") || "";
+      if (!res.ok) {
+        if (contentType.includes("application/json")) {
+          const data = await res.json();
+          alert(data.error || "Download failed.");
+        } else {
+          alert("Download failed.");
+        }
+        return;
+      }
+      const blob = await res.blob();
+      let filename = fmt === "csv" ? "contacts-with-companies.csv" : "contacts-with-companies.xlsx";
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const match = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(disposition);
+      if (match) filename = decodeURIComponent(match[1].replace(/"/g, ""));
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("Download failed.");
     }
   }
 
@@ -1538,6 +1849,7 @@
     const partialStop =
       data.status === "cancelled" ||
       data.quota_exhausted ||
+      data.agent_abort ||
       (data.status === "done" && data.quota_exhausted);
     const counterEl = $("#ai-loading-counter");
 
@@ -1567,6 +1879,10 @@
     const detail = $("#ai-loading-detail");
     if (data.quota_exhausted || (data.status_note && /daily quota is expired/i.test(data.status_note))) {
       detail.textContent = "Your daily quota is expired.";
+      return;
+    }
+    if (data.agent_abort && data.error) {
+      detail.textContent = data.error;
       return;
     }
     if (data.error) {
@@ -1604,6 +1920,8 @@
   async function confirmAiKeyAndContinue() {
     const statusEl = $("#llm-key-error");
     const rawKey = $("#llm-api-key").value.trim();
+    const secondaryKey = ($("#llm-api-key-secondary")?.value || "").trim();
+    const multiAgent = !!$("#llm-multi-agent")?.checked;
     const provider = state.aiProvider || "groq";
     const providerLabel = provider === "groq" ? "Groq" : "Gemini";
     hideToast(statusEl);
@@ -1620,10 +1938,14 @@
     setGeminiKeyLoading(true);
 
     try {
+      const payload = { provider, multi_agent: multiAgent };
+      if (rawKey) payload.api_key = rawKey;
+      if (multiAgent && secondaryKey) payload.api_key_secondary = secondaryKey;
+
       const res = await fetch("/api/ai/llm-key/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(rawKey ? { provider, api_key: rawKey } : { provider }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
 
@@ -1634,6 +1956,8 @@
       }
 
       state.aiProvider = data.provider || provider;
+      state.multiAgent = !!data.multi_agent;
+      updateComposeProviderLabel();
       hideAiKeyModal();
       await setComposeMode("ai");
       goToStep(3);
@@ -1784,6 +2108,10 @@
       state.aiProvider = data.ai_provider === "groq" ? "groq" : "gemini";
       updateComposeProviderLabel();
     }
+    if (typeof data.multi_agent === "boolean") {
+      state.multiAgent = data.multi_agent;
+      updateComposeProviderLabel();
+    }
 
     if (state.composeMode === "manual") showComposeManual();
     else if (state.composeMode === "ai") showComposeAI();
@@ -1793,6 +2121,8 @@
   document.querySelectorAll("[data-llm-provider]").forEach((tab) => {
     tab.addEventListener("click", () => setAiProvider(tab.dataset.llmProvider));
   });
+
+  $("#llm-multi-agent")?.addEventListener("change", updateMultiAgentUi);
 
   $("#compose-choice-manual")?.addEventListener("click", proceedToComposeManual);
   $("#compose-choice-ai")?.addEventListener("click", proceedToComposeAI);
@@ -1808,7 +2138,26 @@
 
   $("#compose-ai-back")?.addEventListener("click", () => goToStep(2));
 
-  $("#ai-loading-cancel")?.addEventListener("click", cancelAiGeneration);
+  $("#ai-loading-cancel")?.addEventListener("click", () => {
+    if (state.loadingModalMode === "fill-companies") {
+      cancelFillCompanies();
+      return;
+    }
+    cancelAiGeneration();
+  });
+
+  $("#upload-analysis-panel")?.addEventListener("click", (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.id === "fill-companies-btn") startFillCompanies();
+    if (target.id === "download-sheet-xlsx") downloadUpdatedSheet("xlsx");
+    if (target.id === "download-sheet-csv") downloadUpdatedSheet("csv");
+  });
+
+  $("#fill-result-close")?.addEventListener("click", hideFillCompaniesResultModal);
+  $("#fill-companies-result-modal")?.addEventListener("click", (e) => {
+    if (e.target.id === "fill-companies-result-modal") hideFillCompaniesResultModal();
+  });
 
   $("#resume-file")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
@@ -1859,7 +2208,11 @@
     const res = await fetch("/api/ai/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ portfolio_url: portfolioUrl, provider: state.aiProvider || "groq" }),
+      body: JSON.stringify({
+        portfolio_url: portfolioUrl,
+        provider: state.aiProvider || "groq",
+        multi_agent: !!state.multiAgent,
+      }),
     });
     const data = await res.json();
     if (handleAuthRequired(res, data)) {

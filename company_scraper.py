@@ -77,6 +77,49 @@ def gather_company_profiles(companies: list[dict], delay_seconds: float = 0.6) -
     return results
 
 
+def sheet_about_for_company(company_name: str, rows: list[dict]) -> str:
+    """First non-empty about text from the sheet for this company name."""
+    key = company_name.strip().lower()
+    if not key:
+        return ""
+    for row in rows:
+        if str(row.get("company_name") or "").strip().lower() != key:
+            continue
+        about = str(row.get("company_about") or "").strip()
+        if about:
+            return about
+    return ""
+
+
+def profile_from_sheet_about(company_name: str, about_text: str) -> dict:
+    text = about_text.strip()
+    return {
+        "company_name": company_name,
+        "found": bool(text),
+        "source_url": "spreadsheet",
+        "text": text,
+        "message": None if text else "Couldn't find company info.",
+        "source": "sheet",
+    }
+
+
+def fetch_or_use_sheet_about(
+    company_name: str,
+    website: str | None,
+    rows: list[dict],
+) -> dict:
+    """Use spreadsheet about when present; otherwise crawl the web."""
+    sheet_about = sheet_about_for_company(company_name, rows)
+    if sheet_about:
+        log.info(
+            "Skip crawl company=%r — using spreadsheet about (%s chars)",
+            company_name,
+            len(sheet_about),
+        )
+        return profile_from_sheet_about(company_name, sheet_about)
+    return fetch_company_about(company_name, website)
+
+
 def fetch_company_about(company_name: str, website: str | None = None) -> dict:
     base = {
         "company_name": company_name,
