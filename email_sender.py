@@ -7,6 +7,7 @@ import json
 import os
 import random
 import smtplib
+import threading
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -22,6 +23,8 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data"))).expanduser()
 SENT_LOG = DATA_DIR / "sent_log.csv"
 DAILY_STATE = DATA_DIR / "daily_state.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+
+_daily_state_lock = threading.Lock()
 
 _SECRET_SETTING_KEYS = ("app_password", "gmail_app_password")
 
@@ -233,9 +236,23 @@ def save_daily_state(email_address: str, count: int) -> None:
     key = _sender_key(email_address)
     if not key:
         return
-    store = _load_daily_store()
-    store["accounts"][key] = int(count)
-    DAILY_STATE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+    with _daily_state_lock:
+        store = _load_daily_store()
+        store["accounts"][key] = int(count)
+        DAILY_STATE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+
+
+def increment_daily_sent(email_address: str) -> int:
+    """Atomically increment today's send count for one address."""
+    key = _sender_key(email_address)
+    if not key:
+        return 0
+    with _daily_state_lock:
+        store = _load_daily_store()
+        count = int(store["accounts"].get(key, 0)) + 1
+        store["accounts"][key] = count
+        DAILY_STATE.write_text(json.dumps(store, indent=2), encoding="utf-8")
+        return count
 
 
 def remaining_today(email_address: str = "") -> int:
@@ -292,10 +309,8 @@ def send_batch(
     if not address or not password:
         raise ValueError("Email account is not configured. Connect your account first.")
 
-    state = load_daily_state(address)
     batch = rows
     results = {"sent": 0, "failed": 0, "skipped_limit": 0, "details": []}
-    sent_count = state["count"]
 
     with smtp_session(provider, address, password) as smtp:
         for i, row in enumerate(batch):
@@ -307,8 +322,7 @@ def send_batch(
             try:
                 smtp.send_message(msg)
                 append_sent_log(email, "sent")
-                sent_count += 1
-                save_daily_state(address, sent_count)
+                increment_daily_sent(address)
                 results["sent"] += 1
                 results["details"].append({"email": email, "status": "sent"})
             except smtplib.SMTPException as exc:
@@ -342,7 +356,6 @@ def send_single(
     if not address or not password:
         raise ValueError("Email account is not configured. Connect your account first.")
 
-    state = load_daily_state(address)
     email = row["email"]
     subject = render_fn(subject_template, row)
     body = render_fn(body_template, row)
@@ -352,5 +365,5 @@ def send_single(
         smtp.send_message(msg)
 
     append_sent_log(email, "sent")
-    save_daily_state(address, state["count"] + 1)
+    increment_daily_sent(address)
     return {"email": email, "status": "sent"}

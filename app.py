@@ -256,8 +256,9 @@ def _mark_skipped_drafts(
             "subject": "",
             "body": "",
             "ok": False,
-            "error": message,
+            "error": "",
             "skipped": True,
+            "quota_stopped": True,
             "llm_processed": True,
         }
     failed = int(ctx["generation"].get("failed", 0)) + max(len(rows) - start_index, 0)
@@ -1130,13 +1131,19 @@ def _run_ai_pipeline_inner(
                     last_exc or "Generation failed.",
                 )
                 ctx = _load_ai_context_by_id(context_id)
-                ctx.setdefault("drafts", {})[email] = {
+                failed_draft = {
                     "subject": "",
                     "body": "",
                     "ok": False,
-                    "error": quota_message if quota_abort else (str(last_exc) if last_exc else "Generation failed."),
+                    "error": "",
                     "llm_processed": True,
                 }
+                if quota_abort:
+                    failed_draft["skipped"] = True
+                    failed_draft["quota_stopped"] = True
+                else:
+                    failed_draft["error"] = str(last_exc) if last_exc else "Generation failed."
+                ctx.setdefault("drafts", {})[email] = failed_draft
                 ctx["generation"]["failed"] = int(ctx["generation"].get("failed", 0)) + 1
                 ctx["generation"]["completed"] = index + 1
                 ctx["generation"]["status_note"] = ""
@@ -1335,6 +1342,30 @@ def _campaign_snapshot(campaign_id: str) -> dict:
 
 
 _FAILED_GENERATION_SUBJECTS = frozenset({"(generation failed)", "generation failed"})
+_FAILED_DRAFT_BODY = (
+    "No draft was produced for this contact. "
+    "Use Regenerate after your API quota resets, or download the remaining spreadsheet to continue later."
+)
+_QUOTA_ERROR_MARKERS = (
+    "groq daily limit",
+    "daily quota",
+    "quota resets",
+    "daily limit reached",
+    "quota exhausted",
+    "try again tomorrow",
+)
+
+
+def _looks_like_quota_error(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    return any(marker in lowered for marker in _QUOTA_ERROR_MARKERS)
+
+
+def _failed_draft_review_copy(draft: dict | None) -> tuple[str, str]:
+    """User-safe subject/body for a failed draft — never expose API quota messages."""
+    if draft and _looks_like_quota_error(str(draft.get("error") or "")):
+        return "(not generated — quota limit)", _FAILED_DRAFT_BODY
+    return "(generation failed)", _FAILED_DRAFT_BODY
 
 
 def _approve_send_blocked(body: dict) -> str | None:
@@ -1346,6 +1377,8 @@ def _approve_send_blocked(body: dict) -> str | None:
     if subject.lower() in _FAILED_GENERATION_SUBJECTS:
         return "This email failed to generate. Regenerate or edit it before sending."
     if body_text.lower().startswith("could not generate"):
+        return "This email failed to generate. Regenerate or edit it before sending."
+    if _looks_like_quota_error(body_text) or _looks_like_quota_error(subject):
         return "This email failed to generate. Regenerate or edit it before sending."
     return None
 
@@ -2431,16 +2464,17 @@ def api_review():
             email = row.get("email", "")
             draft = drafts.get(email)
             if partial_stop:
-                if not draft or draft.get("skipped"):
+                if not draft or draft.get("skipped") or draft.get("quota_stopped"):
                     continue
             if draft is None:
                 draft = {}
             if not draft.get("ok"):
+                subject, body_text = _failed_draft_review_copy(draft)
                 recipients.append(
                     {
                         **row,
-                        "subject": draft.get("subject") or "(generation failed)",
-                        "body": draft.get("error") or "Could not generate this email.",
+                        "subject": subject,
+                        "body": body_text,
                         "customized": True,
                         "ai_generated": True,
                         "generation_failed": True,

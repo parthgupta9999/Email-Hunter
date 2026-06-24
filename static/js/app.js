@@ -366,8 +366,22 @@
     const subject = (recipient.subject || "").trim().toLowerCase();
     const body = (recipient.body || "").trim().toLowerCase();
     if (subject === "(generation failed)" || subject === "generation failed") return true;
+    if (subject === "(not generated — quota limit)") return true;
     if (body.startsWith("could not generate")) return true;
+    if (body.includes("groq daily limit") || body.includes("quota resets")) return true;
     return false;
+  }
+
+  function failedDraftPreviewBody(recipient) {
+    if (!recipient) return "";
+    const body = (recipient.body || "").trim();
+    if (recipient.generation_failed) {
+      return "No draft was produced for this contact. Use Regenerate after your API quota resets, or download the remaining spreadsheet to continue later.";
+    }
+    if (body.toLowerCase().includes("groq daily limit") || body.toLowerCase().includes("quota resets")) {
+      return "No draft was produced for this contact. Use Regenerate after your API quota resets, or download the remaining spreadsheet to continue later.";
+    }
+    return body;
   }
 
   function payloadForRecipient(recipient) {
@@ -677,7 +691,7 @@
           </div>
         </div>
 
-        <div class="gmail-open-body">${highlightSubstitutions(r.body, r)}</div>
+        <div class="gmail-open-body">${highlightSubstitutions(failedDraftPreviewBody(r), r)}</div>
         ${files}
 
         <div class="gmail-open-reply-bar">
@@ -810,7 +824,7 @@
       $("#review-send-badge")?.classList.add("done");
       $("#review-send-badge-text").textContent = `${snap.sent} sent`;
       stopCampaignPolling();
-      refreshQuota();
+      refreshQuota(snap.sent ?? 0);
     } else {
       $("#ring-sublabel").textContent = snap.in_flight > 0 ? "Sending" : "Queued";
       $("#campaign-title").textContent = "Sending your emails…";
@@ -821,6 +835,7 @@
         $("#campaign-last").textContent = `Last: ${snap.last_email}`;
       }
       $("#review-send-badge-text").textContent = `${snap.sent} sent · ${snap.queued + snap.in_flight} queued`;
+      refreshQuota();
     }
   }
 
@@ -2582,10 +2597,14 @@
     return false;
   }
 
-  async function refreshQuota() {
+  async function refreshQuota(campaignSent = null) {
     const status = await fetchStatus();
     const limit = status.recommended_daily_limit ?? status.daily_limit ?? APP_CONFIG.dailyLimit;
-    const sent = status.sent_today ?? 0;
+    let sent = status.sent_today ?? 0;
+    if (campaignSent != null && campaignSent > sent) {
+      sent = campaignSent;
+    }
+    const remaining = Math.max(limit - sent, 0);
     const banner = $("#daily-banner");
     const over = status.over_recommended_daily_limit || sent >= limit;
 
@@ -2593,7 +2612,7 @@
       banner.textContent = `${sent}/${limit} sent today (over recommended limit)`;
       banner.classList.add("is-over-limit");
     } else {
-      banner.textContent = `${sent}/${limit} sent from this address · ${status.remaining_today} left today (recommended)`;
+      banner.textContent = `${sent}/${limit} sent from this address · ${remaining} left today (recommended)`;
       banner.classList.remove("is-over-limit");
     }
   }
