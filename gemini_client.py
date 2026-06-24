@@ -1057,9 +1057,11 @@ def _call_model(
     *,
     call_label: str = "generateContent",
 ) -> tuple[str, str]:
+    global _had_429_this_job
     url = f"{GEMINI_API_BASE}/{model}:generateContent"
     last_rate_error = "Gemini rate limit reached. Generation paused — try again in a few minutes."
     gen_config = _generation_config(model)
+    daily_quota_retried = False
 
     for attempt in range(GEMINI_MAX_RETRIES):
         _check_cancelled(cancel_check)
@@ -1123,6 +1125,13 @@ def _call_model(
         if _is_rate_limited(response.status_code, response.text):
             hint, pause, retryable = _handle_rate_limit_response(response, on_status)
             if not retryable:
+                if not daily_quota_retried:
+                    daily_quota_retried = True
+                    _had_429_this_job = False
+                    if on_status:
+                        on_status("Daily quota reported — waiting 60s, then one retry…")
+                    countdown_wait(60, on_status, "Quota retry —", cancel_check)
+                    continue
                 _mark_quota_exhausted(hint)
                 raise GeminiQuotaExhausted(f"{hint} Try again tomorrow or enable billing.")
             _set_rate_cooldown(pause)
@@ -1144,6 +1153,13 @@ def _call_model(
             if _is_rate_limited(response.status_code, detail or ""):
                 hint, pause, retryable = _handle_rate_limit_response(response, on_status)
                 if not retryable:
+                    if not daily_quota_retried:
+                        daily_quota_retried = True
+                        _had_429_this_job = False
+                        if on_status:
+                            on_status("Daily quota reported — waiting 60s, then one retry…")
+                        countdown_wait(60, on_status, "Quota retry —", cancel_check)
+                        continue
                     _mark_quota_exhausted(hint)
                     raise GeminiQuotaExhausted(f"{hint} Try again tomorrow or enable billing.")
                 _set_rate_cooldown(pause)

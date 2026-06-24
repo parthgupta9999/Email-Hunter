@@ -36,6 +36,10 @@
     loadingModalMode: "ai",
     fillCompaniesPoll: null,
     fillCancelling: false,
+    dailyLimitAcknowledged: false,
+    aiPartialStopData: null,
+    aiLastProgressKey: "",
+    aiLastProgressAt: 0,
   };
 
   const RING_CIRCUMFERENCE = 326.73;
@@ -356,8 +360,22 @@
     return state.recipients.find((r) => r.email === email);
   }
 
+  function recipientIsUndeliverable(recipient) {
+    if (!recipient) return false;
+    if (recipient.generation_failed) return true;
+    const subject = (recipient.subject || "").trim().toLowerCase();
+    const body = (recipient.body || "").trim().toLowerCase();
+    if (subject === "(generation failed)" || subject === "generation failed") return true;
+    if (body.startsWith("could not generate")) return true;
+    return false;
+  }
+
   function payloadForRecipient(recipient) {
-    const base = { fallbacks: getFallbacks(), email: recipient.email };
+    const base = {
+      fallbacks: getFallbacks(),
+      email: recipient.email,
+      generation_failed: Boolean(recipient.generation_failed),
+    };
     if (recipient.customized) {
       return {
         ...base,
@@ -597,9 +615,9 @@
   function buildInboxCard(r) {
     const sender = state.gmailAddress || "you@gmail.com";
     const senderName = sender.split("@")[0].replace(/[._]/g, " ");
-    const failed = Boolean(r.generation_failed);
+    const failed = recipientIsUndeliverable(r);
     const failedBanner = failed
-      ? `<div class="gmail-failed-banner">Drafting failed for this email. Use <strong>Regenerate</strong> to try again, or edit the text manually.</div>`
+      ? `<div class="gmail-failed-banner">Drafting failed for this email. Use <strong>Regenerate</strong> or <strong>Edit</strong> before approving — failed drafts cannot be sent.</div>`
       : "";
     const files = state.hasAttachment
       ? `<div class="gmail-open-files">
@@ -675,6 +693,28 @@
     );
   }
 
+  function updateReviewActions() {
+    const pending = pendingRecipients();
+    const current = pending[0];
+    const undeliverable = recipientIsUndeliverable(current);
+    const approveBtn = $("#btn-approve");
+    if (approveBtn) {
+      approveBtn.disabled = undeliverable || state.animating || state.regenerating || !pending.length;
+      approveBtn.title = undeliverable
+        ? "This draft failed to generate. Regenerate or edit it before approving."
+        : "";
+    }
+    const sendablePending = pending.filter((r) => !recipientIsUndeliverable(r));
+    const approveAllBtn = $("#approve-all-btn");
+    if (approveAllBtn) {
+      approveAllBtn.disabled = sendablePending.length === 0;
+      approveAllBtn.title =
+        pending.length && sendablePending.length === 0
+          ? "No sendable drafts in the queue — regenerate or skip failed emails."
+          : "";
+    }
+  }
+
   function updateReviewStats() {
     const total = state.recipients.length;
     const approved = state.approved.size;
@@ -688,6 +728,7 @@
     $("#review-progress-fill").style.width = total ? `${((approved + rejected) / total) * 100}%` : "0%";
     $("#approve-all-btn").disabled = pending === 0;
     $("#approve-all-btn").classList.toggle("hidden", pending === 0);
+    updateReviewActions();
   }
 
   function showReviewComplete() {
@@ -712,6 +753,11 @@
   async function approveAndSend(recipient) {
     const r = typeof recipient === "string" ? getRecipientByEmail(recipient) : recipient;
     if (!r) return false;
+    if (recipientIsUndeliverable(r)) {
+      toast($("#review-errors"), "This email failed to generate. Regenerate or edit it before sending.", "error");
+      state.approved.delete(r.email);
+      return false;
+    }
     const res = await fetch("/api/campaign/approve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -984,13 +1030,19 @@
     const stage = $("#card-stage");
 
     if (type === "approve") {
+      const recipient = getRecipientByEmail(email);
+      if (recipientIsUndeliverable(recipient)) {
+        state.animating = false;
+        toast($("#review-errors"), "This email failed to generate. Regenerate or edit it before sending.", "error");
+        callback();
+        return;
+      }
       const flash = document.createElement("div");
       flash.className = "approve-flash";
       flash.innerHTML = `${ICONS.check} Approved & sending`;
       stage.appendChild(flash);
       card.classList.add("slide-approve");
       state.approved.add(email);
-      const recipient = getRecipientByEmail(email);
       if (recipient) approveAndSend(recipient);
     } else {
       card.classList.add("slide-reject");
@@ -1073,6 +1125,7 @@
     recipient.subject = subject;
     recipient.body = body;
     recipient.customized = true;
+    recipient.generation_failed = false;
     hideEmailEditModal();
     showCurrentCard();
   }
@@ -1123,18 +1176,26 @@
         banner.textContent = state.reviewNotice;
         banner.classList.remove("hidden");
         banner.classList.add("toast-error");
+      } else if (data.quota_exhausted && data.quota_message) {
+        banner.textContent = data.quota_message;
+        banner.classList.remove("hidden");
+        banner.classList.add("toast-error");
       } else if (state.partialReview && data.generated_ok != null) {
         const count = data.generated_ok;
-        banner.textContent =
-          count === 1
+        const remaining = data.remaining_count ?? 0;
+        banner.textContent = remaining > 0
+          ? `${count} email${count === 1 ? "" : "s"} generated · ${remaining} remaining — download below to resume later.`
+          : count === 1
             ? "Showing 1 generated email from this run."
             : `Showing ${count} generated emails from this run.`;
         banner.classList.remove("hidden", "toast-error");
+        if (data.quota_exhausted) banner.classList.add("toast-error");
       } else {
         banner.classList.add("hidden");
         banner.textContent = "";
       }
     }
+    showReviewRemainingActions(data);
     state.reviewNotice = "";
 
     showCurrentCard();
@@ -1563,6 +1624,9 @@
   function showAiLoadingModal() {
     state.loadingModalMode = "ai";
     resetAiLoadingCancelButton();
+    hideAiPartialStop();
+    state.aiLastProgressKey = "";
+    state.aiLastProgressAt = 0;
     const modal = $("#ai-loading-modal");
     modal.classList.remove("hidden");
     setAiLoadingPhase("scraping");
@@ -1803,6 +1867,34 @@
     }
   }
 
+  async function downloadRemainingSheet(format) {
+    const fmt = format === "csv" ? "csv" : "xlsx";
+    try {
+      const res = await fetch(`/api/upload/download-remaining?format=${encodeURIComponent(fmt)}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || "Download failed.");
+        return;
+      }
+      const blob = await res.blob();
+      let filename = fmt === "csv" ? "contacts-remaining.csv" : "contacts-remaining.xlsx";
+      const disposition = res.headers.get("Content-Disposition") || "";
+      const match = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(disposition);
+      if (match) filename = decodeURIComponent(match[1].replace(/"/g, ""));
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("Download failed.");
+    }
+  }
+
   async function downloadUpdatedSheet(format) {
     const fmt = format || "xlsx";
     try {
@@ -1877,8 +1969,15 @@
     $("#ai-loading-fill").style.width = `${pct}%`;
 
     const detail = $("#ai-loading-detail");
-    if (data.quota_exhausted || (data.status_note && /daily quota is expired/i.test(data.status_note))) {
-      detail.textContent = "Your daily quota is expired.";
+    if (data.quota_exhausted || data.groq_daily_blocked) {
+      detail.textContent =
+        data.quota_message ||
+        data.groq_block_message ||
+        "Groq daily limit reached — try again after your quota resets (usually within 24 hours).";
+      return;
+    }
+    if (data.status_note && /daily quota is expired|groq daily/i.test(data.status_note)) {
+      detail.textContent = data.status_note;
       return;
     }
     if (data.agent_abort && data.error) {
@@ -2016,7 +2115,68 @@
     }
   }
 
+  function shouldShowAiPartialStop(data) {
+    const generatedOk = data.generated_ok ?? data.drafts_ready ?? 0;
+    const total = data.total || state.aiWriteTotal || 0;
+    if (data.quota_exhausted || data.groq_daily_blocked) return true;
+    if (data.status === "error" && generatedOk > 0) return true;
+    if (data.status === "cancelled" && generatedOk > 0) return true;
+    if (data.status === "done" && total > 0 && generatedOk < total) return true;
+    return false;
+  }
+
+  function showAiPartialStop(data) {
+    stopAiGenPoll();
+    resetAiLoadingCancelButton();
+    $("#ai-generate-btn").disabled = false;
+    state.aiPartialStopData = data;
+
+    const generatedOk = data.generated_ok ?? data.drafts_ready ?? 0;
+    const remaining = data.remaining_count ?? Math.max((data.total || 0) - generatedOk, 0);
+    let text =
+      data.quota_message ||
+      data.error ||
+      data.status_note ||
+      data.groq_block_message ||
+      "";
+
+    if (!text && data.quota_exhausted) {
+      text = `Groq daily limit reached after ${generatedOk} email${generatedOk === 1 ? "" : "s"}. Your quota resets on a rolling 24-hour window — try again tomorrow.`;
+    } else if (!text) {
+      text = `Generation stopped — ${generatedOk} email${generatedOk === 1 ? "" : "s"} ready to review.`;
+    }
+    if (remaining > 0) {
+      text += ` ${remaining} contact${remaining === 1 ? "" : "s"} still need drafts — download below to resume later.`;
+    }
+
+    $("#ai-loading-partial-msg").textContent = text;
+    $("#ai-loading-partial")?.classList.remove("hidden");
+    $("#ai-loading-cancel")?.classList.add("hidden");
+    updateAiLoadingProgress(data);
+  }
+
+  function hideAiPartialStop() {
+    $("#ai-loading-partial")?.classList.add("hidden");
+    $("#ai-loading-cancel")?.classList.remove("hidden");
+    state.aiPartialStopData = null;
+  }
+
+  function showReviewRemainingActions(data) {
+    const panel = $("#review-remaining-actions");
+    const remaining = data?.remaining_count ?? 0;
+    if (!panel || remaining <= 0) {
+      panel?.classList.add("hidden");
+      return;
+    }
+    const text = data.quota_exhausted
+      ? `${remaining} contact${remaining === 1 ? "" : "s"} still need AI drafts. Download and re-upload tomorrow when your Groq quota resets.`
+      : `${remaining} contact${remaining === 1 ? "" : "s"} were not generated. Download the spreadsheet to resume later.`;
+    $("#review-remaining-text").textContent = text;
+    panel.classList.remove("hidden");
+  }
+
   function handleAiGenerationStopped(data) {
+    hideAiPartialStop();
     stopAiGenPoll();
     resetAiLoadingCancelButton();
     $("#ai-generate-btn").disabled = false;
@@ -2036,16 +2196,32 @@
     const data = await res.json();
     if (!data.ok) return;
     updateAiLoadingProgress(data);
+
+    if (data.status === "running") {
+      const progressKey = `${data.phase}:${data.generated_ok}:${data.completed}:${data.scrape_completed}`;
+      if (state.aiLastProgressKey === progressKey) {
+        if (!state.aiLastProgressAt) state.aiLastProgressAt = Date.now();
+        else if (Date.now() - state.aiLastProgressAt > 180000) {
+          const detail = $("#ai-loading-detail");
+          if (detail && !data.quota_exhausted) {
+            detail.textContent =
+              "Still waiting on Groq — large prompts can take up to a minute. If this stays stuck, cancel and download remaining contacts.";
+          }
+        }
+      } else {
+        state.aiLastProgressKey = progressKey;
+        state.aiLastProgressAt = Date.now();
+      }
+    }
+
+    if (shouldShowAiPartialStop(data)) {
+      showAiPartialStop(data);
+      return;
+    }
+
     const generatedOk = data.generated_ok ?? data.drafts_ready ?? 0;
 
     if (data.status === "done") {
-      if (data.quota_exhausted) {
-        await finishAiGenerationToReview(
-          data,
-          "Your daily quota is expired. Review the emails generated so far."
-        );
-        return;
-      }
       await finishAiGenerationToReview(data, "");
     } else if (data.status === "cancelled") {
       if (generatedOk > 0) {
@@ -2154,6 +2330,22 @@
     if (target.id === "download-sheet-csv") downloadUpdatedSheet("csv");
   });
 
+  $("#ai-download-remaining-xlsx")?.addEventListener("click", () => downloadRemainingSheet("xlsx"));
+  $("#ai-download-remaining-csv")?.addEventListener("click", () => downloadRemainingSheet("csv"));
+  $("#review-download-remaining-xlsx")?.addEventListener("click", () => downloadRemainingSheet("xlsx"));
+  $("#review-download-remaining-csv")?.addEventListener("click", () => downloadRemainingSheet("csv"));
+
+  $("#ai-continue-review")?.addEventListener("click", async () => {
+    const data = state.aiPartialStopData;
+    if (!data) return;
+    const notice =
+      data.quota_message ||
+      (data.quota_exhausted
+        ? "Groq daily limit reached. Review generated emails, then resume tomorrow with the remaining spreadsheet."
+        : "Partial generation — review what's ready, then continue later with the remaining contacts.");
+    await finishAiGenerationToReview(data, notice);
+  });
+
   $("#fill-result-close")?.addEventListener("click", hideFillCompaniesResultModal);
   $("#fill-companies-result-modal")?.addEventListener("click", (e) => {
     if (e.target.id === "fill-companies-result-modal") hideFillCompaniesResultModal();
@@ -2223,9 +2415,25 @@
     if (!data.ok) {
       hideAiLoadingModal();
       btn.disabled = false;
-      toast(statusEl, data.error || "Could not start generation.", "error");
+      if (data.code === "groq_daily_exhausted") {
+        const hours = data.hours_until_retry || 24;
+        toast(
+          statusEl,
+          `${data.error} Retry in about ${hours} hour${hours === 1 ? "" : "s"}.`,
+          "error"
+        );
+        if (data.can_download_remaining) {
+          await downloadRemainingSheet("xlsx");
+        }
+      } else {
+        toast(statusEl, data.error || "Could not start generation.", "error");
+      }
       return;
     }
+
+    state.aiLastProgressKey = "";
+    state.aiLastProgressAt = 0;
+    hideAiPartialStop();
 
     state.aiScrapeTotal = data.scrape_total || 0;
     state.aiWriteTotal = data.total || 0;
@@ -2304,23 +2512,43 @@
     if (e.target.id === "email-edit-modal") hideEmailEditModal();
   });
 
-  $("#btn-approve").addEventListener("click", () => {
+  $("#btn-approve").addEventListener("click", async () => {
     const pending = pendingRecipients();
     if (!pending.length || state.animating || state.regenerating) return;
+    if (recipientIsUndeliverable(pending[0])) {
+      toast($("#review-errors"), "This email failed to generate. Regenerate or edit it before sending.", "error");
+      return;
+    }
+    if (!(await ensureDailyLimitAllowed(1))) return;
     animateDecision("approve", pending[0].email, showCurrentCard);
   });
 
   $("#approve-all-btn").addEventListener("click", async () => {
     const pending = pendingRecipients();
     if (!pending.length || state.animating) return;
-    const n = pending.length;
+    const sendable = pending.filter((r) => !recipientIsUndeliverable(r));
+    const skipped = pending.length - sendable.length;
+    if (!sendable.length) {
+      toast($("#review-errors"), "No sendable drafts left — regenerate or skip failed emails.", "error");
+      return;
+    }
+    const n = sendable.length;
+    if (!(await ensureDailyLimitAllowed(n))) return;
+    const skipNote = skipped
+      ? `\n\n${skipped} failed draft${skipped === 1 ? "" : "s"} will be skipped.`
+      : "";
     const ok = confirm(
-      `Approve and send all ${n} remaining email${n === 1 ? "" : "s"}?\n\nEach will be sent immediately in the background.`
+      `Approve and send ${n} email${n === 1 ? "" : "s"}?${skipNote}\n\nEach will be sent immediately in the background.`
     );
     if (!ok) return;
-    for (const r of [...pending]) {
+    for (const r of sendable) {
       state.approved.add(r.email);
       await approveAndSend(r);
+    }
+    for (const r of pending) {
+      if (recipientIsUndeliverable(r) && !state.approved.has(r.email)) {
+        state.rejected.add(r.email);
+      }
     }
     updateReviewStats();
     showReviewComplete();
@@ -2334,9 +2562,40 @@
 
   $("#campaign-compose-btn").addEventListener("click", () => goToStep(3));
 
+  async function ensureDailyLimitAllowed(extraCount = 1) {
+    if (state.dailyLimitAcknowledged) return true;
+
+    const status = await fetchStatus();
+    const limit = status.recommended_daily_limit ?? status.daily_limit ?? APP_CONFIG.dailyLimit;
+    const sent = status.sent_today ?? 0;
+    if (sent + extraCount <= limit) return true;
+
+    const overBy = sent + extraCount - limit;
+    const msg = sent >= limit
+      ? `You've sent ${sent} emails today (recommended: ${limit}/day for deliverability).\n\nSend ${extraCount === 1 ? "this one" : `${extraCount} more`} anyway?`
+      : `This will bring you to ${sent + extraCount}/${limit} emails today (${overBy} over the recommended daily limit).\n\nContinue anyway?`;
+
+    if (confirm(msg)) {
+      state.dailyLimitAcknowledged = true;
+      return true;
+    }
+    return false;
+  }
+
   async function refreshQuota() {
     const status = await fetchStatus();
-    $("#daily-banner").textContent = `${status.sent_today}/${status.daily_limit} sent from this address · ${status.remaining_today} left today`;
+    const limit = status.recommended_daily_limit ?? status.daily_limit ?? APP_CONFIG.dailyLimit;
+    const sent = status.sent_today ?? 0;
+    const banner = $("#daily-banner");
+    const over = status.over_recommended_daily_limit || sent >= limit;
+
+    if (over) {
+      banner.textContent = `${sent}/${limit} sent today (over recommended limit)`;
+      banner.classList.add("is-over-limit");
+    } else {
+      banner.textContent = `${sent}/${limit} sent from this address · ${status.remaining_today} left today (recommended)`;
+      banner.classList.remove("is-over-limit");
+    }
   }
 
   function deriveFields(cols, rows = []) {

@@ -32,9 +32,14 @@ from gemini_client import (
     verify_api_key as verify_gemini_api_key,
 )
 from groq_client import (
+    GROQ_DAILY_USER_MESSAGE,
     GROQ_MODEL,
     GroqQuotaExhausted,
+    daily_exhaustion_record,
     generate_outreach_email as generate_outreach_email_groq,
+    groq_block_from_stored,
+    looks_like_groq_daily_error,
+    record_groq_daily_exhaustion,
     reset_rate_limit_tracking as reset_groq_rate_limit_tracking,
     verify_api_key as verify_groq_api_key,
 )
@@ -181,6 +186,18 @@ def _draft_stats(ctx: dict) -> dict[str, int]:
     return {"generated_ok": generated_ok, "drafts_ready": processed}
 
 
+def _remaining_row_count(ctx: dict, upload_data: dict | None) -> int:
+    rows = (upload_data or {}).get("rows") or []
+    drafts = ctx.get("drafts") or {}
+    ok_emails = {email for email, draft in drafts.items() if (draft or {}).get("ok")}
+    ok_lower = {email.lower() for email in ok_emails}
+    return sum(
+        1
+        for row in rows
+        if (row.get("email") or "").lower() not in ok_lower
+    )
+
+
 def _generation_status_payload(job_id: str | None, context_id: str | None) -> dict:
     ctx = _load_ai_context_by_id(context_id) if context_id else _load_ai_context()
     snapshot = dict(_gen_snapshot(job_id, context_id) if job_id else (ctx.get("generation") or {}))
@@ -196,7 +213,73 @@ def _generation_status_payload(job_id: str | None, context_id: str | None) -> di
     )
     if not snapshot.get("error"):
         snapshot["error"] = (ctx.get("generation") or {}).get("error") or ""
+    if not snapshot.get("quota_message"):
+        snapshot["quota_message"] = (ctx.get("generation") or {}).get("quota_message") or ""
+    upload_data = _load_session_data()
+    snapshot["remaining_count"] = _remaining_row_count(ctx, upload_data)
+    provider = ctx.get("ai_provider") or session.get("ai_provider") or "groq"
+    groq_block = None
+    if provider == "groq":
+        pq = (ctx.get("provider_quota") or {}).get("groq")
+        groq_block = groq_block_from_stored(pq)
+    snapshot["groq_daily_blocked"] = bool(groq_block and groq_block.get("blocked"))
+    if groq_block:
+        snapshot["groq_hours_until_retry"] = groq_block.get("hours_until_retry")
+        snapshot["groq_block_message"] = groq_block.get("message")
     return snapshot
+
+
+def _persist_groq_daily_quota(context_id: str, record: dict | None) -> None:
+    if not record:
+        return
+    ctx = _load_ai_context_by_id(context_id)
+    ctx.setdefault("provider_quota", {})["groq"] = record
+    _save_ai_context_by_id(context_id, ctx)
+
+
+def _groq_generate_block(ctx: dict) -> dict | None:
+    pq = (ctx.get("provider_quota") or {}).get("groq")
+    return groq_block_from_stored(pq)
+
+
+def _mark_skipped_drafts(
+    context_id: str,
+    job_id: str,
+    rows: list[dict],
+    start_index: int,
+    message: str,
+) -> None:
+    ctx = _load_ai_context_by_id(context_id)
+    for row in rows[start_index:]:
+        email = row.get("email", "")
+        ctx.setdefault("drafts", {})[email] = {
+            "subject": "",
+            "body": "",
+            "ok": False,
+            "error": message,
+            "skipped": True,
+            "llm_processed": True,
+        }
+    failed = int(ctx["generation"].get("failed", 0)) + max(len(rows) - start_index, 0)
+    ctx["generation"]["failed"] = failed
+    ctx["generation"]["completed"] = len(rows)
+    ctx["generation"]["quota_exhausted"] = True
+    ctx["generation"]["quota_message"] = message
+    ctx["generation"]["status_note"] = message
+    ctx["generation"]["generated_ok"] = _draft_stats(ctx)["generated_ok"]
+    _save_ai_context_by_id(context_id, ctx)
+    with _gen_lock:
+        if job_id in _gen_jobs:
+            _gen_jobs[job_id].update(
+                {
+                    "failed": failed,
+                    "completed": len(rows),
+                    "quota_exhausted": True,
+                    "quota_message": message,
+                    "status_note": message,
+                    "generated_ok": ctx["generation"]["generated_ok"],
+                }
+            )
 from email_sender import (
     DAILY_LIMIT,
     append_sent_log,
@@ -212,6 +295,7 @@ from email_sender import (
 from excel_parser import (
     MAX_RECIPIENTS,
     available_tokens,
+    export_remaining_spreadsheet,
     export_spreadsheet,
     parse_excel,
     refresh_upload_metadata,
@@ -680,16 +764,75 @@ def _run_ai_pipeline(
                 _gen_jobs[job_id]["generated_ok"] = generated_ok
                 _gen_jobs[job_id]["current"] = ""
                 _gen_jobs[job_id]["current_company"] = ""
+    except GroqQuotaExhausted as exc:
+        pipeline_log.error("PIPELINE GROQ QUOTA job=%s: %s", job_id, exc)
+        ctx = _load_ai_context_by_id(context_id)
+        record = daily_exhaustion_record() or record_groq_daily_exhaustion(
+            getattr(exc, "hint", str(exc)), kind=getattr(exc, "kind", "daily")
+        )
+        _persist_groq_daily_quota(context_id, record)
+        generated_ok = _draft_stats(ctx)["generated_ok"]
+        msg = str(exc)
+        ctx["generation"]["status"] = "done"
+        ctx["generation"]["phase"] = "done"
+        ctx["generation"]["quota_exhausted"] = True
+        ctx["generation"]["quota_message"] = msg
+        ctx["generation"]["error"] = msg
+        ctx["generation"]["status_note"] = msg
+        ctx["generation"]["generated_ok"] = generated_ok
+        _save_ai_context_by_id(context_id, ctx)
+        with _gen_lock:
+            if job_id in _gen_jobs:
+                _gen_jobs[job_id].update(
+                    {
+                        "status": "done",
+                        "phase": "done",
+                        "quota_exhausted": True,
+                        "quota_message": msg,
+                        "error": msg,
+                        "status_note": msg,
+                        "generated_ok": generated_ok,
+                    }
+                )
+    except GeminiQuotaExhausted as exc:
+        pipeline_log.error("PIPELINE GEMINI QUOTA job=%s: %s", job_id, exc)
+        ctx = _load_ai_context_by_id(context_id)
+        generated_ok = _draft_stats(ctx)["generated_ok"]
+        msg = str(exc)
+        ctx["generation"]["status"] = "done"
+        ctx["generation"]["phase"] = "done"
+        ctx["generation"]["quota_exhausted"] = True
+        ctx["generation"]["quota_message"] = msg
+        ctx["generation"]["error"] = msg
+        ctx["generation"]["status_note"] = msg
+        ctx["generation"]["generated_ok"] = generated_ok
+        _save_ai_context_by_id(context_id, ctx)
+        with _gen_lock:
+            if job_id in _gen_jobs:
+                _gen_jobs[job_id].update(
+                    {
+                        "status": "done",
+                        "phase": "done",
+                        "quota_exhausted": True,
+                        "quota_message": msg,
+                        "error": msg,
+                        "status_note": msg,
+                        "generated_ok": generated_ok,
+                    }
+                )
     except Exception as exc:
         pipeline_log.exception("PIPELINE ERROR job=%s: %s", job_id, exc)
         ctx = _load_ai_context_by_id(context_id)
+        generated_ok = _draft_stats(ctx)["generated_ok"]
         ctx["generation"]["status"] = "error"
         ctx["generation"]["error"] = str(exc)
+        ctx["generation"]["generated_ok"] = generated_ok
         _save_ai_context_by_id(context_id, ctx)
         with _gen_lock:
             if job_id in _gen_jobs:
                 _gen_jobs[job_id]["status"] = "error"
                 _gen_jobs[job_id]["error"] = str(exc)
+                _gen_jobs[job_id]["generated_ok"] = generated_ok
 
 
 def _run_ai_pipeline_inner(
@@ -848,41 +991,13 @@ def _run_ai_pipeline_inner(
         quota_abort = False
         agent_abort = False
         agent_abort_message = ""
-        quota_message = QUOTA_EXPIRED_MESSAGE
+        quota_message = GROQ_DAILY_USER_MESSAGE if provider == "groq" else QUOTA_EXPIRED_MESSAGE
 
         for index, row in enumerate(rows):
             _raise_if_cancelled(job_id, context_id)
             if agent_abort:
                 break
             email = row.get("email", "")
-
-            if quota_abort:
-                pipeline_log.warning(
-                    "EMAIL %s/%s SKIPPED (quota exhausted) | %s",
-                    index + 1,
-                    len(rows),
-                    quota_message,
-                )
-                ctx = _load_ai_context_by_id(context_id)
-                ctx.setdefault("drafts", {})[email] = {
-                    "subject": "",
-                    "body": "",
-                    "ok": False,
-                    "error": quota_message,
-                    "skipped": True,
-                }
-                ctx["generation"]["failed"] = int(ctx["generation"].get("failed", 0)) + 1
-                ctx["generation"]["completed"] = index + 1
-                ctx["generation"]["status_note"] = quota_message
-                ctx["generation"]["quota_exhausted"] = True
-                _save_ai_context_by_id(context_id, ctx)
-                with _gen_lock:
-                    if job_id in _gen_jobs:
-                        _gen_jobs[job_id]["failed"] = int(_gen_jobs[job_id].get("failed", 0)) + 1
-                        _gen_jobs[job_id]["completed"] = index + 1
-                        _gen_jobs[job_id]["status_note"] = quota_message
-                        _gen_jobs[job_id]["quota_exhausted"] = True
-                continue
 
             company = row.get("company_name", "")
             pipeline_log.info(
@@ -946,6 +1061,15 @@ def _run_ai_pipeline_inner(
                     raise
                 except OrchestrationAgentError as exc:
                     last_exc = exc
+                    if provider == "groq" and looks_like_groq_daily_error(str(exc)):
+                        quota_abort = True
+                        quota_message = GROQ_DAILY_USER_MESSAGE
+                        _persist_groq_daily_quota(
+                            context_id,
+                            record_groq_daily_exhaustion(str(exc)),
+                        )
+                        pipeline_log.error("GROQ QUOTA (orchestration) at email %s", index + 1)
+                        break
                     agent_abort = True
                     agent_abort_message = str(exc)
                     pipeline_log.error("ORCHESTRATION ABORT at email %s: %s", index + 1, exc)
@@ -953,11 +1077,24 @@ def _run_ai_pipeline_inner(
                 except (GeminiQuotaExhausted, GroqQuotaExhausted) as exc:
                     last_exc = exc
                     quota_abort = True
-                    quota_message = QUOTA_EXPIRED_MESSAGE
-                    pipeline_log.error("QUOTA EXHAUSTED at email %s — skipping rest", index + 1)
+                    quota_message = str(exc)
+                    if isinstance(exc, GroqQuotaExhausted):
+                        record = daily_exhaustion_record() or record_groq_daily_exhaustion(
+                            getattr(exc, "hint", quota_message),
+                            kind=getattr(exc, "kind", "daily"),
+                        )
+                        _persist_groq_daily_quota(context_id, record)
+                    pipeline_log.error("QUOTA EXHAUSTED at email %s — stopping pipeline", index + 1)
                     break
                 except Exception as exc:
                     last_exc = exc
+                    if provider == "groq" and looks_like_groq_daily_error(str(exc)):
+                        quota_abort = True
+                        quota_message = GROQ_DAILY_USER_MESSAGE
+                        _persist_groq_daily_quota(
+                            context_id,
+                            record_groq_daily_exhaustion(str(exc)),
+                        )
                     pipeline_log.error("EMAIL %s attempt %s failed: %s", index + 1, email_attempt + 1, exc)
                     break
 
@@ -1005,14 +1142,23 @@ def _run_ai_pipeline_inner(
                 ctx["generation"]["status_note"] = ""
                 if quota_abort:
                     ctx["generation"]["quota_exhausted"] = True
+                    ctx["generation"]["quota_message"] = quota_message
+                    ctx["generation"]["status_note"] = quota_message
                 _save_ai_context_by_id(context_id, ctx)
                 with _gen_lock:
                     if job_id in _gen_jobs:
                         _gen_jobs[job_id]["failed"] = int(_gen_jobs[job_id].get("failed", 0)) + 1
                         _gen_jobs[job_id]["completed"] = index + 1
-                        _gen_jobs[job_id]["status_note"] = ""
                         if quota_abort:
                             _gen_jobs[job_id]["quota_exhausted"] = True
+                            _gen_jobs[job_id]["quota_message"] = quota_message
+                            _gen_jobs[job_id]["status_note"] = quota_message
+                        else:
+                            _gen_jobs[job_id]["status_note"] = ""
+
+            if quota_abort:
+                _mark_skipped_drafts(context_id, job_id, rows, index + 1, quota_message)
+                break
 
             if agent_abort:
                 ctx = _load_ai_context_by_id(context_id)
@@ -1076,8 +1222,15 @@ def _run_ai_pipeline_inner(
     ctx["generation"]["phase"] = "done"
     ctx["generation"]["current"] = ""
     ctx["generation"]["current_company"] = ""
-    ctx["generation"]["status_note"] = ""
+    if gen.get("quota_exhausted"):
+        note = gen.get("quota_message") or (GROQ_DAILY_USER_MESSAGE if provider == "groq" else QUOTA_EXPIRED_MESSAGE)
+        ctx["generation"]["status_note"] = note
+        ctx["generation"]["quota_message"] = note
+    else:
+        ctx["generation"]["status_note"] = ""
     ctx["generation"]["generated_ok"] = stats["generated_ok"]
+    if stats["generated_ok"] >= len(rows) and provider == "groq":
+        ctx.setdefault("provider_quota", {}).pop("groq", None)
     _save_ai_context_by_id(context_id, ctx)
     with _gen_lock:
         if job_id in _gen_jobs:
@@ -1181,6 +1334,22 @@ def _campaign_snapshot(campaign_id: str) -> dict:
         }
 
 
+_FAILED_GENERATION_SUBJECTS = frozenset({"(generation failed)", "generation failed"})
+
+
+def _approve_send_blocked(body: dict) -> str | None:
+    """Return an error message if this draft must not be sent."""
+    if body.get("generation_failed"):
+        return "This email failed to generate. Regenerate or edit it before sending."
+    subject = (body.get("subject") or "").strip()
+    body_text = (body.get("body") or "").strip()
+    if subject.lower() in _FAILED_GENERATION_SUBJECTS:
+        return "This email failed to generate. Regenerate or edit it before sending."
+    if body_text.lower().startswith("could not generate"):
+        return "This email failed to generate. Regenerate or edit it before sending."
+    return None
+
+
 def _prepare_send_context(body: dict) -> tuple[dict | None, str | None, list | None, dict | None, list[tuple[Path, str]] | None]:
     data = _load_session_data()
     if not data:
@@ -1203,9 +1372,6 @@ def _prepare_send_context(body: dict) -> tuple[dict | None, str | None, list | N
         )
         if errors:
             return None, None, errors, None, None
-
-    if remaining_today(_smtp_settings().get("email_address", "")) <= 0:
-        return None, f"Daily limit of {DAILY_LIMIT} emails reached for this sending address.", None, None, None
 
     attachments: list[tuple[Path, str]] = []
     file_entry = _get_attachment_file()
@@ -1313,8 +1479,10 @@ def api_status():
             "gmail_address": settings.get("email_address", ""),
             "email_address": settings.get("email_address", ""),
             "daily_limit": DAILY_LIMIT,
+            "recommended_daily_limit": DAILY_LIMIT,
             "sent_today": state["count"],
             "remaining_today": remaining_today(sender),
+            "over_recommended_daily_limit": state["count"] >= DAILY_LIMIT,
             "has_upload": data is not None,
             "upload_summary": {
                 "selected_count": data["selected_count"],
@@ -1545,6 +1713,7 @@ def api_ai_llm_key_status():
 
     provider = _normalize_ai_provider(request.args.get("provider") or session.get("ai_provider"))
     ctx = _load_ai_context()
+    groq_block = _groq_generate_block(ctx) if provider == "groq" else None
     return jsonify(
         {
             "ok": True,
@@ -1554,6 +1723,9 @@ def api_ai_llm_key_status():
             "has_groq_key": bool(session.get("groq_api_key")),
             "multi_agent": bool(ctx.get("multi_agent")),
             "has_secondary_key": bool(_secondary_api_key(provider)),
+            "groq_daily_blocked": bool(groq_block and groq_block.get("blocked")),
+            "groq_block_message": (groq_block or {}).get("message"),
+            "groq_hours_until_retry": (groq_block or {}).get("hours_until_retry"),
         }
     )
 
@@ -1631,6 +1803,21 @@ def api_ai_generate():
     if not api_key:
         label = "Groq" if provider == "groq" else "Gemini"
         return jsonify({"ok": False, "error": f"Enter your {label} API key."}), 400
+
+    if provider == "groq":
+        groq_block = _groq_generate_block(ctx)
+        if groq_block:
+            remaining = _remaining_row_count(ctx, data)
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": groq_block["message"],
+                    "code": "groq_daily_exhausted",
+                    "hours_until_retry": groq_block.get("hours_until_retry"),
+                    "remaining_count": remaining,
+                    "can_download_remaining": remaining > 0,
+                }
+            ), 429
 
     multi_agent = bool(body.get("multi_agent") if "multi_agent" in body else ctx.get("multi_agent"))
     secondary_key = (body.get("api_key_secondary") or _secondary_api_key(provider)).strip()
@@ -2103,6 +2290,60 @@ def api_upload_fill_companies_cancel():
     return jsonify({"ok": True})
 
 
+@app.route("/api/upload/download-remaining", methods=["GET"])
+def api_upload_download_remaining():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    data = _load_session_data()
+    if not data:
+        return jsonify({"ok": False, "error": "Upload a spreadsheet first."}), 400
+
+    ctx = _load_ai_context()
+    drafts = ctx.get("drafts") or {}
+
+    fmt = (request.args.get("format") or "xlsx").strip().lower()
+    if fmt not in {"xlsx", "csv"}:
+        fmt = "xlsx"
+
+    try:
+        content, mime, filename = export_remaining_spreadsheet(data, drafts, fmt)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    return send_file(
+        BytesIO(content),
+        mimetype=mime,
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+@app.route("/api/ai/quota-status", methods=["GET"])
+def api_ai_quota_status():
+    blocked = _require_gmail_verified()
+    if blocked:
+        return blocked
+
+    ctx = _load_ai_context()
+    data = _load_session_data()
+    provider = _normalize_ai_provider(request.args.get("provider") or ctx.get("ai_provider"))
+    payload = {
+        "ok": True,
+        "provider": provider,
+        "remaining_count": _remaining_row_count(ctx, data),
+        "generated_ok": _draft_stats(ctx)["generated_ok"],
+    }
+    if provider == "groq":
+        block = _groq_generate_block(ctx)
+        payload["groq_daily_blocked"] = bool(block and block.get("blocked"))
+        if block:
+            payload["message"] = block.get("message")
+            payload["hours_until_retry"] = block.get("hours_until_retry")
+    return jsonify(payload)
+
+
 @app.route("/api/upload/download", methods=["GET"])
 def api_upload_download():
     blocked = _require_gmail_verified()
@@ -2183,6 +2424,7 @@ def api_review():
             bool(gen.get("quota_exhausted"))
             or gen.get("status") == "cancelled"
             or bool(gen.get("agent_abort"))
+            or _draft_stats(ctx)["generated_ok"] < len(data["rows"])
         )
         recipients = []
         for row in data["rows"]:
@@ -2222,7 +2464,10 @@ def api_review():
                 "ai_mode": True,
                 "partial_review": partial_stop,
                 "agent_abort": bool(gen.get("agent_abort")),
+                "quota_exhausted": bool(gen.get("quota_exhausted")),
+                "quota_message": gen.get("quota_message") or "",
                 "generated_ok": _draft_stats(ctx)["generated_ok"],
+                "remaining_count": _remaining_row_count(ctx, data),
             }
         )
 
@@ -2516,6 +2761,10 @@ def api_campaign_approve():
     if not email:
         return jsonify({"ok": False, "error": "Email is required."}), 400
 
+    block_reason = _approve_send_blocked(body)
+    if block_reason:
+        return jsonify({"ok": False, "error": block_reason, "code": "generation_failed"}), 400
+
     data, err, errors, fallbacks, attachments = _prepare_send_context(body)
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -2598,12 +2847,6 @@ def api_send():
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
 
-    sender = _smtp_settings().get("email_address", "")
-    if remaining_today(sender) <= 0:
-        return jsonify(
-            {"ok": False, "error": f"Daily limit of {DAILY_LIMIT} emails reached for this sending address."}
-        ), 400
-
     attachments: list[tuple[Path, str]] = []
     file_entry = _get_attachment_file()
     if file_entry:
@@ -2631,7 +2874,7 @@ def api_send():
         _send_jobs[job_id] = {
             "status": "running",
             "current": 0,
-            "total": min(len(rows_to_send), remaining_today(sender)),
+            "total": len(rows_to_send),
             "last_email": "",
             "result": None,
         }

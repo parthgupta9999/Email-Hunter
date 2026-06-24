@@ -96,7 +96,7 @@
             <li>Write one template — name and company fill in from the sheet.</li>
             <li>Check each email before it sends.</li>
             <li>Runs on your machine. Credentials stay here.</li>
-            <li>Max {{ daily_limit }} emails per day per connected address.</li>
+            <li>Recommended: up to {{ daily_limit }} emails per day per connected address (you can override).</li>
           </ul>
 
           <div class="info-callout info-callout-trust">
@@ -308,6 +308,13 @@
         <span id="review-counter" class="review-count">0 / 0</span>
       </div>
       <div id="review-partial-banner" class="toast hidden" role="status"></div>
+      <div id="review-remaining-actions" class="review-remaining-actions hidden">
+        <p id="review-remaining-text" class="field-hint"></p>
+        <div class="analysis-download-buttons">
+          <button type="button" class="btn btn-soft btn-sm" id="review-download-remaining-xlsx">Download remaining (.xlsx)</button>
+          <button type="button" class="btn btn-soft btn-sm" id="review-download-remaining-csv">Download remaining (.csv)</button>
+        </div>
+      </div>
 
       <div class="review-stage" id="card-stage">
         <div id="review-loading" class="state-empty hidden">Preparing previews…</div>
@@ -406,7 +413,7 @@
       <img class="logo-mark logo-mark-sm" src="/static/mono.png" alt="" width="20" height="20" aria-hidden="true">
       Email Hunter
     </span>
-    <span>{{ daily_limit }} emails/day · local & private</span>
+    <span>~{{ daily_limit }} emails/day recommended · local & private</span>
   </footer>
     </div>
   </div>
@@ -531,6 +538,14 @@
           <span id="ai-loading-counter" class="review-count">0 / 0</span>
         </div>
         <p id="ai-loading-detail" class="field-hint"></p>
+      </div>
+      <div id="ai-loading-partial" class="ai-loading-partial hidden">
+        <p id="ai-loading-partial-msg" class="modal-lead"></p>
+        <div class="ai-loading-partial-actions">
+          <button type="button" class="btn btn-soft btn-sm" id="ai-download-remaining-xlsx">Download remaining (.xlsx)</button>
+          <button type="button" class="btn btn-soft btn-sm" id="ai-download-remaining-csv">Download remaining (.csv)</button>
+          <button type="button" class="btn btn-brand btn-sm" id="ai-continue-review">Review generated emails</button>
+        </div>
       </div>
       <button type="button" class="btn btn-soft ai-loading-cancel" id="ai-loading-cancel">Cancel</button>
     </div>

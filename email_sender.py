@@ -25,7 +25,8 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 
 _SECRET_SETTING_KEYS = ("app_password", "gmail_app_password")
 
-DAILY_LIMIT = 50
+RECOMMENDED_DAILY_LIMIT = 50
+DAILY_LIMIT = RECOMMENDED_DAILY_LIMIT  # advisory — not enforced on send
 DEFAULT_DELAY_SECONDS = 60.0
 DEFAULT_DELAY_JITTER = 30.0
 
@@ -238,8 +239,14 @@ def save_daily_state(email_address: str, count: int) -> None:
 
 
 def remaining_today(email_address: str = "") -> int:
+    """Emails left until the recommended daily cap (0 if already at or over it)."""
     state = load_daily_state(email_address)
     return max(DAILY_LIMIT - state["count"], 0)
+
+
+def over_recommended_daily_limit(email_address: str = "") -> bool:
+    state = load_daily_state(email_address)
+    return state["count"] >= DAILY_LIMIT
 
 
 def build_message(
@@ -286,14 +293,8 @@ def send_batch(
         raise ValueError("Email account is not configured. Connect your account first.")
 
     state = load_daily_state(address)
-    remaining = max(DAILY_LIMIT - state["count"], 0)
-    if remaining <= 0:
-        raise ValueError(
-            f"Daily limit of {DAILY_LIMIT} emails reached for {address}. Try again tomorrow."
-        )
-
-    batch = rows[:remaining]
-    results = {"sent": 0, "failed": 0, "skipped_limit": len(rows) - len(batch), "details": []}
+    batch = rows
+    results = {"sent": 0, "failed": 0, "skipped_limit": 0, "details": []}
     sent_count = state["count"]
 
     with smtp_session(provider, address, password) as smtp:
@@ -342,11 +343,6 @@ def send_single(
         raise ValueError("Email account is not configured. Connect your account first.")
 
     state = load_daily_state(address)
-    if state["count"] >= DAILY_LIMIT:
-        raise ValueError(
-            f"Daily limit of {DAILY_LIMIT} emails reached for {address}. Try again tomorrow."
-        )
-
     email = row["email"]
     subject = render_fn(subject_template, row)
     body = render_fn(body_template, row)

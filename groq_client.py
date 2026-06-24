@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -29,16 +31,30 @@ GROQ_RPM_LIMIT = 28
 GROQ_RPM_WINDOW_SEC = 60.0
 GROQ_MAX_RETRIES = 2
 GROQ_RETRY_BASE_SEC = 5.0
+GROQ_DAILY_RETRY_WAIT_SEC = 60.0
+GROQ_DAILY_COOLDOWN_SEC = 24 * 3600
 
 _rate_lock = threading.Lock()
 _last_request_at = 0.0
 _request_times: list[float] = []
 _quota_exhausted = False
+_daily_exhaustion: dict[str, Any] | None = None
 _api_request_seq = 0
+
+GROQ_DAILY_USER_MESSAGE = (
+    "Groq daily limit reached for this API key. "
+    "You cannot generate more emails until your Groq quota resets (rolling 24h window). "
+    "Download the remaining contacts and try again tomorrow."
+)
 
 
 class GroqQuotaExhausted(ValueError):
     """Groq daily / token quota hit — waiting won't help until reset."""
+
+    def __init__(self, message: str, *, kind: str = "daily", hint: str = "") -> None:
+        self.kind = kind
+        self.hint = hint or message
+        super().__init__(message)
 
 
 def reset_rate_limit_tracking() -> None:
@@ -49,6 +65,68 @@ def reset_rate_limit_tracking() -> None:
     _quota_exhausted = False
     _api_request_seq = 0
     log.info("Groq rate-limit tracking reset (new job)")
+
+
+def daily_exhaustion_record() -> dict[str, Any] | None:
+    return dict(_daily_exhaustion) if _daily_exhaustion else None
+
+
+def groq_block_from_stored(stored: dict | None) -> dict[str, Any] | None:
+    """Return block info if Groq daily quota was hit recently (rolling 24h)."""
+    if not stored or not stored.get("daily_exhausted"):
+        return None
+    raw_at = stored.get("exhausted_at")
+    if not raw_at:
+        return {
+            "blocked": True,
+            "message": stored.get("message") or GROQ_DAILY_USER_MESSAGE,
+            "hours_until_retry": 24,
+            "kind": stored.get("kind") or "daily",
+        }
+    try:
+        exhausted_at = datetime.fromisoformat(str(raw_at).replace("Z", "+00:00"))
+        if exhausted_at.tzinfo is None:
+            exhausted_at = exhausted_at.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {
+            "blocked": True,
+            "message": stored.get("message") or GROQ_DAILY_USER_MESSAGE,
+            "hours_until_retry": 24,
+            "kind": stored.get("kind") or "daily",
+        }
+    elapsed = (datetime.now(timezone.utc) - exhausted_at.astimezone(timezone.utc)).total_seconds()
+    if elapsed >= GROQ_DAILY_COOLDOWN_SEC:
+        return None
+    hours_left = max(1, math.ceil((GROQ_DAILY_COOLDOWN_SEC - elapsed) / 3600))
+    return {
+        "blocked": True,
+        "message": stored.get("message") or GROQ_DAILY_USER_MESSAGE,
+        "hours_until_retry": hours_left,
+        "kind": stored.get("kind") or "daily",
+        "exhausted_at": raw_at,
+    }
+
+
+def looks_like_groq_daily_error(message: str) -> bool:
+    text = (message or "").lower()
+    if not text:
+        return False
+    daily_markers = (
+        "tokens per day",
+        "requests per day",
+        "rate limit reached for model",
+        "daily",
+        "tpd",
+        "rpd",
+        "quota exceeded",
+        "exceeded your current quota",
+    )
+    minute_markers = ("per minute", "rpm", "tpm", "try again in")
+    if any(marker in text for marker in daily_markers):
+        return True
+    if "rate limit" in text and not any(marker in text for marker in minute_markers):
+        return True
+    return False
 
 
 def _check_cancelled(cancel_check: Callable[[], bool] | None) -> None:
@@ -112,48 +190,90 @@ def _parse_rate_limit_headers(response: requests.Response) -> dict[str, Any]:
     }
 
 
-def _quota_hint(response: requests.Response) -> str:
-    text = response.text.lower()
+def _error_message(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+        err = payload.get("error") or {}
+        if isinstance(err, dict):
+            return str(err.get("message") or response.text)
+        return str(err or response.text)
+    except Exception:
+        return response.text
+
+
+def _classify_groq_429(response: requests.Response) -> dict[str, Any]:
+    text = _error_message(response).lower()
+    body = response.text.lower()
     headers = _parse_rate_limit_headers(response)
-    if "tokens per day" in text or "tpd" in text:
+    combined = f"{text} {body}"
+
+    if any(marker in combined for marker in ("tokens per day", "requests per day", " per day", "daily limit")):
+        kind = "tpd" if "token" in combined else "rpd"
+        return {"kind": kind, "retryable": False, "daily": True}
+
+    if "tokens per minute" in combined or "requests per minute" in combined:
+        return {"kind": "rpm", "retryable": True, "daily": False}
+
+    limit_req = headers.get("limit_requests")
+    remaining_req = headers.get("remaining_requests")
+    if remaining_req == 0 and limit_req is not None and limit_req <= 120:
+        return {"kind": "rpm", "retryable": True, "daily": False}
+
+    if remaining_req == 0 and limit_req is not None and limit_req > 120:
+        return {"kind": "rpd", "retryable": False, "daily": True}
+
+    if looks_like_groq_daily_error(combined):
+        return {"kind": "daily", "retryable": False, "daily": True}
+
+    if "rate limit" in combined or "quota" in combined:
+        return {"kind": "unknown", "retryable": False, "daily": True}
+
+    return {"kind": "unknown", "retryable": True, "daily": False}
+
+
+def _quota_hint(response: requests.Response, classification: dict[str, Any] | None = None) -> str:
+    classification = classification or _classify_groq_429(response)
+    headers = _parse_rate_limit_headers(response)
+    kind = classification.get("kind")
+
+    if kind in {"tpd", "daily"} or "token" in str(kind):
         return (
-            "Groq daily token limit reached for this model. "
+            f"Groq daily token limit reached for {GROQ_MODEL}. "
             "Resets on a rolling 24h window — check console.groq.com/settings/limits."
         )
-    if "requests per day" in text or "rpd" in text:
+    if kind == "rpd":
         limit = headers.get("limit_requests")
-        base = "Groq daily request limit reached"
+        base = f"Groq daily request limit reached for {GROQ_MODEL}"
         if limit:
-            base += f" ({limit}/day for {GROQ_MODEL})"
+            base += f" ({limit}/day)"
         return f"{base}. Resets on a rolling 24h window."
-    if "tokens per minute" in text or "tpm" in text:
-        return "Groq tokens-per-minute limit — waiting before retry."
-    if "requests per minute" in text or "rpm" in text:
+    if kind == "rpm":
         return "Groq requests-per-minute limit — waiting before retry."
     return "Groq rate limit reached — check console.groq.com/settings/limits."
 
 
-def _is_daily_quota_response(response: requests.Response) -> bool:
-    text = response.text.lower()
-    if "tokens per day" in text or "requests per day" in text:
-        return True
-    headers = _parse_rate_limit_headers(response)
-    if headers.get("remaining_requests") == 0:
-        return True
-    return False
-
-
-def _mark_quota_exhausted(hint: str) -> None:
-    global _quota_exhausted
+def _mark_quota_exhausted(hint: str, *, kind: str = "daily") -> dict[str, Any]:
+    global _quota_exhausted, _daily_exhaustion
     _quota_exhausted = True
-    log.error("Groq quota exhausted — stopping further API calls | %s", hint)
+    _daily_exhaustion = {
+        "daily_exhausted": True,
+        "kind": kind,
+        "message": GROQ_DAILY_USER_MESSAGE,
+        "hint": hint,
+        "exhausted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    log.error("Groq quota exhausted — stopping further API calls | kind=%s | %s", kind, hint)
+    return dict(_daily_exhaustion)
+
+
+def record_groq_daily_exhaustion(hint: str, *, kind: str = "daily") -> dict[str, Any]:
+    """Mark Groq daily quota as exhausted and return a record for persistence."""
+    return _mark_quota_exhausted(hint, kind=kind)
 
 
 def _raise_if_quota_exhausted() -> None:
     if _quota_exhausted:
-        raise GroqQuotaExhausted(
-            "Your daily quota is expired. Review the emails generated so far."
-        )
+        raise GroqQuotaExhausted(GROQ_DAILY_USER_MESSAGE)
 
 
 def _call_model(
@@ -177,6 +297,7 @@ def _call_model(
     }
 
     last_error = "Groq could not generate a response."
+    daily_quota_retried = False
     for attempt in range(GROQ_MAX_RETRIES + 1):
         _check_cancelled(cancel_check)
         _wait_for_rate_limit(on_status, cancel_check)
@@ -196,10 +317,20 @@ def _call_model(
             raise ValueError("Invalid Groq API key. Check your key at console.groq.com/keys.")
 
         if response.status_code == 429:
-            hint = _quota_hint(response)
-            if _is_daily_quota_response(response) or attempt >= GROQ_MAX_RETRIES:
-                _mark_quota_exhausted(hint)
-                raise GroqQuotaExhausted("Your daily quota is expired. Review the emails generated so far.")
+            classification = _classify_groq_429(response)
+            hint = _quota_hint(response, classification)
+            if classification.get("daily"):
+                if not daily_quota_retried:
+                    daily_quota_retried = True
+                    if on_status:
+                        on_status("Daily quota reported — waiting 60s, then one retry…")
+                    countdown_wait(GROQ_DAILY_RETRY_WAIT_SEC, on_status, "Quota retry —", cancel_check)
+                    continue
+                _mark_quota_exhausted(hint, kind=str(classification.get("kind") or "daily"))
+                raise GroqQuotaExhausted(GROQ_DAILY_USER_MESSAGE, kind=str(classification.get("kind") or "daily"), hint=hint)
+            if attempt >= GROQ_MAX_RETRIES:
+                _mark_quota_exhausted(hint, kind=str(classification.get("kind") or "daily"))
+                raise GroqQuotaExhausted(GROQ_DAILY_USER_MESSAGE, kind=str(classification.get("kind") or "daily"), hint=hint)
             pause = _parse_rate_limit_headers(response).get("retry_after") or (GROQ_RETRY_BASE_SEC * (attempt + 1))
             if on_status:
                 on_status(f"Groq busy — retrying in {int(pause)}s…")
@@ -207,10 +338,17 @@ def _call_model(
             continue
 
         if response.status_code >= 400:
-            try:
-                detail = response.json().get("error", {}).get("message", response.text)
-            except Exception:
-                detail = response.text
+            detail = _error_message(response)
+            if looks_like_groq_daily_error(detail):
+                hint = _quota_hint(response)
+                if not daily_quota_retried:
+                    daily_quota_retried = True
+                    if on_status:
+                        on_status("Daily quota reported — waiting 60s, then one retry…")
+                    countdown_wait(GROQ_DAILY_RETRY_WAIT_SEC, on_status, "Quota retry —", cancel_check)
+                    continue
+                _mark_quota_exhausted(hint)
+                raise GroqQuotaExhausted(GROQ_DAILY_USER_MESSAGE, hint=hint)
             raise ValueError(detail or f"Groq API error ({response.status_code}).")
 
         data = response.json()

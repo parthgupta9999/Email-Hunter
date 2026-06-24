@@ -552,6 +552,12 @@ body {
   border: 1px solid #c7dcff;
 }
 
+.quota-badge.is-over-limit {
+  color: #9a3412;
+  background: #fff7ed;
+  border-color: #fdba74;
+}
+
 /* Shell */
 .shell {
   max-width: var(--content-max);
@@ -2254,6 +2260,11 @@ body {
 
 .decision-approve { background: var(--success-soft); color: var(--success); border: 1.5px solid var(--success-border); }
 .decision-approve:hover { background: var(--success); color: #fff; border-color: var(--success); }
+.decision-approve:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none !important;
+}
 
 .decision-approve-all {
   background: linear-gradient(135deg, #059669, #047857);
@@ -3055,6 +3066,32 @@ body {
   margin-left: auto;
   margin-right: auto;
   display: block;
+}
+
+.ai-loading-partial {
+  margin-top: 1rem;
+  text-align: center;
+}
+
+.ai-loading-partial-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 0.75rem;
+}
+
+.review-remaining-actions {
+  margin: 0.75rem 0 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+}
+
+.review-remaining-actions .field-hint {
+  margin: 0 0 0.65rem;
+  color: #9a3412;
 }
 
 /* Gather info — magnifier on monitor */

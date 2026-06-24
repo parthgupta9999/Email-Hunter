@@ -18,7 +18,7 @@ Everything runs on **your machine**. Spreadsheets, drafts, and logs stay in the 
 | **Company research** | Scrapes public About pages when needed. **Skipped** if your sheet already has a Company about column filled in. |
 | **Review before send** | Approve, edit, or reject each email. Regenerate individual AI drafts if needed. |
 | **Attachments** | Attach a resume (AI path) and optional PDF/DOC files on manual sends. |
-| **Rate limits** | ~60–90 s between sends and **50 emails/day per connected sending address** (anti-spam). |
+| **Rate limits** | ~60–90 s between sends. **Recommended:** ~50 emails/day per connected address (warning only — you can override). |
 
 **What it does not do:** It is not a CRM, not an email finder, and does not send without your review. Personal emails (Gmail, Yahoo, etc.) cannot be mapped to a company name automatically.
 
@@ -133,15 +133,17 @@ Work/school accounts may need SMTP enabled by IT.
 
 ## Limits
 
-The daily cap applies to the **connected sending address**, not a separate “user account” in the app.
+The daily recommendation applies to the **connected sending address**, not a separate “user account” in the app. The app warns when you go past it but does not block sends.
 
 | Limit | Value |
 |-------|-------|
 | Per upload | 50 contacts |
-| Per day | 50 emails **per connected address** (resets midnight local time) |
+| Per day (recommended) | ~50 emails **per connected address** — warning only, overridable (resets midnight local time) |
 | Delay between sends | ~60–90 seconds |
 
 AI limits depend on your **Groq/Gemini** plan (requests per minute/day). Multi-agent mode uses roughly **twice** as many calls per contact.
+
+**Groq daily quota:** If generation stops partway (e.g. after ~30–40 emails on the free tier), the app shows a clear message, blocks new AI runs for ~24 hours, and lets you **download a spreadsheet of remaining contacts** to re-upload and resume the next day.
 
 ---
 

@@ -498,6 +498,28 @@ EXPORT_COLUMNS = (
 )
 
 
+def _draft_ok(drafts: dict, email: str) -> bool:
+    key = (email or "").strip().lower()
+    for draft_key, draft in (drafts or {}).items():
+        if (draft_key or "").strip().lower() == key:
+            return bool((draft or {}).get("ok"))
+    return False
+
+
+def export_remaining_spreadsheet(data: dict, drafts: dict | None, fmt: str = "xlsx") -> tuple[bytes, str, str]:
+    """Export rows that do not yet have a successful AI draft."""
+    rows = data.get("rows") or []
+    remaining = [row for row in rows if not _draft_ok(drafts or {}, row.get("email", ""))]
+    if not remaining:
+        raise ValueError("No remaining contacts to export — every row has a generated draft.")
+    subset = {**data, "rows": remaining}
+    content, mime, filename = export_spreadsheet(subset, fmt)
+    stem = (data.get("original_filename") or "contacts").rsplit(".", 1)[0]
+    if fmt == "csv":
+        return content, mime, f"{stem}-remaining.csv"
+    return content, mime, f"{stem}-remaining.xlsx"
+
+
 def export_spreadsheet(data: dict, fmt: str = "xlsx") -> tuple[bytes, str, str]:
     """Build a downloadable spreadsheet from session upload data."""
     cols = data.get("detected_columns") or {}
