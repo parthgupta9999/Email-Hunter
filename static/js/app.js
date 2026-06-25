@@ -2570,9 +2570,12 @@
   });
 
   $("#campaign-new-btn").addEventListener("click", async () => {
-    await fetch("/api/session/reset", { method: "POST" });
+    window.__ehSessionActive = false;
     stopCampaignPolling();
-    resetUiToFresh();
+    stopAiGenPoll();
+    if (state.regenJobId) await cancelRegenerate().catch(() => {});
+    await fetch("/api/session/reset", { method: "POST" });
+    location.reload();
   });
 
   $("#campaign-compose-btn").addEventListener("click", () => goToStep(3));
