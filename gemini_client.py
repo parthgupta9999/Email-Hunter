@@ -161,10 +161,12 @@ def _log_candidate(label: str, payload: dict[str, Any]) -> None:
 
 EMAIL_WRITING_RULES = """Rules (apply to every email):
 - Sound human, confident, and curious — not desperate or salesy.
-- No bullet points, dashes used as bullets, semicolons, or emojis.
+- Humanise the tone: write out contractions (e.g. "I am" not "I'm", "I have" not "I've", "you are" not "you're").
+- Do not use hyphens anywhere in the subject or body — rephrase instead of hyphenated compounds.
+- No bullet points, semicolons, or emojis.
 - Do not open with "I hope this email finds you well" or close with "I look forward to hearing from you."
 - Do not use buzzwords like leverage, synergy, passionate, dynamic, or hardworking.
-- Mention naturally that the candidate's resume is attached (e.g. "I've attached my resume").
+- Mention naturally that the candidate's resume is attached (e.g. "I have attached my resume").
 {portfolio_instruction}
 - 150 to 220 words in the body, in 3 or 4 short paragraphs.
 - End with the candidate's name and one contact line from the resume (email or phone)."""
@@ -254,11 +256,13 @@ Write a complete, send-ready email from the candidate to this recipient.
 
 Rules:
 - Sound human, confident, and curious — not desperate or salesy.
-- No bullet points, dashes used as bullets, semicolons, or emojis.
+- Humanise the tone: write out contractions (e.g. "I am" not "I'm", "I have" not "I've", "you are" not "you're").
+- Do not use hyphens anywhere in the subject or body — rephrase instead of hyphenated compounds.
+- No bullet points, semicolons, or emojis.
 - Do not open with "I hope this email finds you well" or close with "I look forward to hearing from you."
 - Do not use buzzwords like leverage, synergy, passionate, dynamic, or hardworking.
 - Do not pretend to know what company or product they work on. Keep it general but strong — focus on the candidate's skills and interest in impactful engineering work.
-- Mention naturally that the candidate's resume is attached (e.g. "I've attached my resume").
+- Mention naturally that the candidate's resume is attached (e.g. "I have attached my resume").
 {portfolio_instruction}
 - 150 to 220 words in the body, in 3 or 4 short paragraphs.
 - Start with a brief greeting like "Hi there," — do not use a company name in the greeting.
@@ -283,6 +287,50 @@ def _portfolio_instruction(portfolio_url: str | None) -> str:
     if portfolio_url and portfolio_url.strip():
         return "- Include the portfolio link once in the body (not in the subject)."
     return ""
+
+
+def format_email_writing_rules(portfolio_url: str | None = None) -> str:
+    return EMAIL_WRITING_RULES.format(portfolio_instruction=_portfolio_instruction(portfolio_url))
+
+
+_CONTRACTION_FIXES: tuple[tuple[str, str], ...] = (
+    (r"\bI'm\b", "I am"),
+    (r"\bI've\b", "I have"),
+    (r"\bI'll\b", "I will"),
+    (r"\bI'd\b", "I would"),
+    (r"\byou're\b", "you are"),
+    (r"\byou've\b", "you have"),
+    (r"\byou'll\b", "you will"),
+    (r"\bwe're\b", "we are"),
+    (r"\bwe've\b", "we have"),
+    (r"\bthey're\b", "they are"),
+    (r"\bthey've\b", "they have"),
+    (r"\bit's\b", "it is"),
+    (r"\bthat's\b", "that is"),
+    (r"\bwhat's\b", "what is"),
+    (r"\bhere's\b", "here is"),
+    (r"\bthere's\b", "there is"),
+    (r"\bdon't\b", "do not"),
+    (r"\bdoesn't\b", "does not"),
+    (r"\bcan't\b", "cannot"),
+    (r"\bwon't\b", "will not"),
+    (r"\bwouldn't\b", "would not"),
+    (r"\bshouldn't\b", "should not"),
+    (r"\bcouldn't\b", "could not"),
+    (r"\bhaven't\b", "have not"),
+    (r"\bhasn't\b", "has not"),
+    (r"\bisn't\b", "is not"),
+    (r"\baren't\b", "are not"),
+    (r"\bwasn't\b", "was not"),
+    (r"\bweren't\b", "were not"),
+    (r"\bdidn't\b", "did not"),
+)
+
+
+def _humanize_email_text(text: str) -> str:
+    for pattern, replacement in _CONTRACTION_FIXES:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return re.sub(r"(?<=\w)-(?=\w)", " ", text)
 
 
 def _greeting_name(person_name: str) -> str | None:
@@ -512,12 +560,14 @@ Write a complete, send-ready email from the candidate to someone at {company_nam
 
 Rules:
 - Sound human, confident, and curious — not desperate or salesy.
-- No bullet points, dashes used as bullets, semicolons, or emojis.
+- Humanise the tone: write out contractions (e.g. "I am" not "I'm", "I have" not "I've", "you are" not "you're").
+- Do not use hyphens anywhere in the subject or body — rephrase instead of hyphenated compounds.
+- No bullet points, semicolons, or emojis.
 - Do not open with "I hope this email finds you well" or close with "I look forward to hearing from you."
 - Do not use buzzwords like leverage, synergy, passionate, dynamic, or hardworking.
 - Use the company background when it is specific; if you do not know the company well, be honest and general without inventing product details.
 - Never use the word "Unknown" in the subject or body.
-- Mention naturally that the candidate's resume is attached (e.g. "I've attached my resume").
+- Mention naturally that the candidate's resume is attached (e.g. "I have attached my resume").
 {portfolio_instruction}
 - 150 to 220 words in the body, in 3 or 4 short paragraphs.
 - Start the body with a brief greeting (e.g. "Hi there," or "Hello {company_name} team,").
@@ -635,7 +685,9 @@ def _sanitize_draft(subject: str, body: str) -> tuple[str, str]:
         flags=re.I,
     )
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
-    return subject.strip(), body.strip()
+    subject = _humanize_email_text(subject.strip())
+    body = _humanize_email_text(body)
+    return subject, body
 
 
 _INPUT_ECHO_RE = re.compile(

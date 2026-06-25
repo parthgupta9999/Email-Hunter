@@ -15,10 +15,12 @@ from typing import Any
 import requests
 
 from gemini_client import (
+    CACHE_SYSTEM_INSTRUCTION,
     GenerationCancelled,
     build_prompt,
     build_recipient_prompt,
     countdown_wait,
+    format_email_writing_rules,
 )
 
 log = logging.getLogger("email_hunter.groq")
@@ -276,12 +278,19 @@ def _raise_if_quota_exhausted() -> None:
         raise GroqQuotaExhausted(GROQ_DAILY_USER_MESSAGE)
 
 
+def _groq_system_message(portfolio_url: str | None = None) -> str:
+    rules = format_email_writing_rules(portfolio_url)
+    return CACHE_SYSTEM_INSTRUCTION.format(rules=rules)
+
+
 def _call_model(
     api_key: str,
     prompt: str,
     on_status: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     call_label: str = "groq",
+    *,
+    portfolio_url: str | None = None,
 ) -> str:
     _raise_if_quota_exhausted()
     url = f"{GROQ_API_BASE}/chat/completions"
@@ -291,7 +300,10 @@ def _call_model(
     }
     payload = {
         "model": GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {"role": "system", "content": _groq_system_message(portfolio_url)},
+            {"role": "user", "content": prompt},
+        ],
         "max_tokens": 2048,
         "temperature": 0.7,
     }
@@ -471,6 +483,7 @@ def generate_outreach_email(
             extra = (
                 "\n\nIMPORTANT: Your previous reply was incomplete or malformed. "
                 "Write the FULL email now — greeting, 3-4 paragraphs, sign-off, and contact info. "
+                "Humanise the tone: write out contractions (I am not I'm). Do not use hyphens. "
                 "Do not repeat instructions. Start with SUBJECT: on the first line."
             )
 
@@ -480,6 +493,7 @@ def generate_outreach_email(
             on_status,
             cancel_check=cancel_check,
             call_label=f"{company_name or 'email'} draft {attempt + 1}/2",
+            portfolio_url=portfolio_url,
         )
 
         from gemini_client import _looks_valid_draft, _word_count  # noqa: PLC0415
